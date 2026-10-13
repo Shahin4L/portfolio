@@ -1,0 +1,1325 @@
+// ===== Attendance System v9.4 : Code.gs =====
+// v9.4: (1) Overnight shift fix: Daily_Log "Date" = Shift Start Date (check-in date) and the shift's Working Day = that same Shift Start Date
+//           (11-Oct 10 PM -> 12-Oct 6 AM counts as 11-Oct; Day Off is also evaluated on 11-Oct). A check-in made after midnight but before the
+//           department's Auto Check out clock belongs to the previous night's shift. New column "Working Day" (R) stores it for audit.
+//       (2) Department configuration is read from the Users tab, columns Q:T
+//           Q = Department Name | R = Reporting Time (clock) | S = Minimum Check out Time (DURATION, never a clock) | T = Auto Check out (clock).
+//       (3) Automatic Check-out by a server-side time-driven trigger (autoCheckoutRun). Run setupAutoCheckoutTrigger() once.
+//       Everything else is exactly as in v9.3. Existing rows are never rewritten. NOTE: run authorize() once, then deploy a NEW version.
+// v9.3: (1) Employee leave request: OPTIONAL file attachment (saved to Google Drive, link stored in Leave_Requests column "Attachment").
+//       (2) Salary calculation: new "Absent" card, read from Attendance Report column AQ.
+//       Everything else is exactly as in v9.2.  NOTE: Drive is used now, so run authorize() once and deploy a NEW version.
+// v9.2: Weekend (day-off) is read from the month's Attendance Report tabs (e.g. "Oct 26 (Operator)" + "Oct 26 (Management)"), merged, never overwritten.
+// v9.1: Attendance / Salary period is now the 21st of a month to the 20th of the next month (see PERIOD settings below).
+//       Only the month-based date ranges changed. Everything else is exactly as in v9.
+// v9: Management Force Check-out (active session list, search, audit trail, server-side validation). Everything from v8 is kept.
+// v8 changes:
+//  - Users sheet is now: Email | Employee ID | Name | Role | Scope (columns are found by header name).
+//  - Floor Lead / Line Lead leave requests skip both lead stages and go straight to Manager approval.
+//    All other employees keep the normal FloorLead -> LineLead -> Manager workflow.
+//  - Everything from v7 is kept (persistent sessions, duplicate check-in guard, leave rules, locations, salary, remarks).
+const DATA_SS = '1QEb5S6C-tagfKPkdDmic1l3YF_WNPiHy3X0_YZ4PZUw'; // Employee Data Sheet
+const DATA_TAB = 'Data Sheet';
+const LOG_SS = '194GWs3udb4ZsWQev5PRimHdqdChWO0dytHYdvtVOxNA';  // Check-in & Check-out Dashboard
+const ATT_SS = '1RKCIfnV_BRYvrbKeIF8k679LUF8Rr1Q7XxtP0qA4w7Q'; // Attendance Report (weekend / day-off source)
+const MIN_HOURS = 5, TZ = 'Asia/Dhaka';
+// v9.4: column 18 "Working Day" added at the END (existing columns keep their positions; the header is added automatically).
+const LOG_H = ['Date','Emp ID','Name','Office','Department','Check In','Check Out','Hours','In Lat','In Lng','Out Lat','Out Lng','In Location','Out Location','Check-out Method','Forced By','Force Note','Working Day'];
+const LV_H = ['Req ID','Requested At','Emp ID','Name','Department','From','To','Reason','Emergency','Floor Lead','Line Lead','Manager','Final','Remarks','Leave Type','Attachment'];
+// v8: Users sheet = Email | Employee ID | Name | Role | Scope
+const US_H = ['Email','Employee ID','Name','Role','Scope'];
+const RM_H = ['Date','Emp ID','Name','Department','Reason','Call Outcome','Emergency','Remarks','Logged By','Role','Logged At'];
+// v9: audit trail of every management force check-out
+const FC_H = ['Action ID','Action At','Action By','By Email','By Role','Emp ID','Name','Department','Attendance Date','Check In','Forced Check-Out','Hours','Reason','Remarks'];
+const FORCE_ROLES = ['FloorLead','LineLead','Manager','Zonal Role'];   // roles allowed to force check-out (Viewer is not allowed)
+const FORCE_REASONS = ['Forgot to check out','Network / device problem','Shift ended, app not used','Wrong or duplicate check-in','Other'];
+const FORCE_METHOD = 'Management Force Check-out';
+const FORCE_STALE_HOURS = 16;       // an open session older than this (or from a previous shift date) is flagged "Open too long"
+const HD_H = ['Date','Name']; // Holidays tab: Date (yyyy-mm-dd) + holiday name
+const REASONS = ['Sick / Medical','Family emergency','Transport issue','Personal reason','Not reachable','Informed leave','Other'];
+const OUTCOMES = ['Reached','No answer','Phone switched off','Wrong number'];
+const REMARK_ROLES = ['LineLead','FloorLead','Manager','Zonal Role'];
+const SALARY_ROLES = ['Manager','Zonal Role'];
+// Fixed approval order: FloorLead -> LineLead -> Manager.
+const STAGE = { FloorLead: 9, LineLead: 10, Manager: 11 };
+const APPROVAL_ORDER = ['FloorLead','LineLead','Manager'];
+const SKIPPED = 'Skipped';                 // stage value used when a stage is bypassed (Lead requests)
+const LEAD_ROLES = ['floorlead','linelead']; // roles whose own leave goes directly to Manager
+const CACHE = CacheService.getScriptCache();
+const SESSION_PROPS = PropertiesService.getScriptProperties();
+
+// ---------- POLICY SETTINGS (edit here) ----------
+const SESSION_DAYS = 30;            // login stays valid this many days (renewed automatically while in use) until the user signs out
+const LOCATION_REQUIRED = false;    // true  = check-in / check-out is blocked without GPS location
+                                    // false = allowed without location (employee is warned and must confirm)
+const ONE_CHECKIN_PER_DAY = true;   // true  = after a completed check-out, the next check-in opens on the next date
+                                    // false = more check-ins on the same date are allowed (after check-out)
+const LEAVE_TYPES = ['Casual Leave','Sick Leave','Annual Leave','Emergency Leave','Unpaid Leave','Other'];
+const MAX_LEAVE_DAYS = 60;          // longest single request (calendar days)
+const BACKDATE_DAYS = 30;           // how many days back a leave may start
+const LEAVE_EXCLUDE_OFFDAYS = false;// false = duration counts every calendar day (existing behaviour)
+                                    // true  = weekly day-off (Attendance Report) and Holidays tab dates are not counted
+const EXPIRED = 'Your session has expired. Please sign in again.';
+
+// ---------- v9.4: OVERNIGHT SHIFT + AUTOMATIC CHECK-OUT SETTINGS ----------
+const TZ_MS = 6 * 3600000;          // Asia/Dhaka = UTC+06:00 (no daylight saving; the same offset the app already uses elsewhere)
+const USE_SHEET_MIN_DURATION = true;// true  = Users!S (a DURATION such as 5 or 5:00) is the department's minimum working time; blank/invalid -> MIN_HOURS (5)
+                                    // false = always the global MIN_HOURS (exactly the old behaviour)
+const AUTO_CHECKOUT_METHOD = 'Auto Check-out (System)';   // written to "Check-out Method" so system-made records are easy to audit
+const AUTO_CHECKOUT_BY = 'System (Scheduler)';            // written to "Forced By"
+const AUTO_TRIGGER_MINUTES = 10;    // how often the scheduler runs (allowed: 1, 5, 10, 15, 30)
+const AUTO_MAX_AGE_HOURS = 48;      // an open shift whose auto check-out time passed more than this long ago is NOT touched (left for Management Force Check-out)
+const AC_H = ['Logged At','Run ID','Event','Emp ID','Name','Department','Shift Start Date','Check In','Scheduled Auto Check-out','Hours','Detail'];
+
+// ---------- LEAVE ATTACHMENT (v9.3, optional file on a leave request) ----------
+const ATTACH_MAX_MB = 5;                                   // largest file accepted
+const ATTACH_FOLDER_NAME = 'Leave Attachments';            // Drive folder (created automatically in the script owner's My Drive)
+const ATTACH_MIME = { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+                      doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
+const ATTACH_EXT = Object.keys(ATTACH_MIME);
+
+// ---------- ATTENDANCE / SALARY PERIOD (v9.1) ----------
+// A period runs from the PERIOD_START_DAY of one month to the day before PERIOD_START_DAY of the next month.
+//   21 Sep - 20 Oct, 21 Oct - 20 Nov, 21 Nov - 20 Dec, 21 Dec - 20 Jan ...  (all dates are calculated, none are hard-coded)
+// PERIOD_LABEL_BY_END decides which month NAME a period carries (used by the Salary month picker and the
+// Attendance Report tab-name matching):
+//   true  = the month in which the period ENDS   ->  21 Sep 2026 - 20 Oct 2026  is "October 2026"
+//   false = the month in which the period STARTS ->  21 Sep 2026 - 20 Oct 2026  is "September 2026"
+// Keep the same two values in the HTML file.
+const PERIOD_START_DAY = 21;
+const PERIOD_LABEL_BY_END = true;
+
+// ---- Attendance Report column mapping (fixed letters) ----
+//  BC = Working day (Present)   AT = Public Holiday   AU = Holiday (Day off work)
+//  AV = OT                      AS = Off day          AR = Leave          AQ = Absent (v9.3)
+const ATT_MAP = { working: 'BC', pubHoliday: 'AT', holiday: 'AU', ot: 'AV', offDay: 'AS', leave: 'AR', absent: 'AQ' };
+const colIdx_ = L => L.split('').reduce((a, ch) => a * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+
+// ---- Weekend (weekly day-off) source: the monthly tabs of the Attendance Report sheet ----
+//  Tabs are named like "Oct 26 (Operator)" and "Oct 26 (Management)" (month + year in the name). Every tab of the
+//  selected month is read. Normally the header row (ID / Weekend) is detected automatically; if no header is found,
+//  these fixed columns are used: ID = column A, Weekend = column J.
+const WK_ID_COL = 'A', WK_DAY_COL = 'J';
+
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile('Index').setTitle('Attendance')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+// ---------- Cache helpers (chunked, so big lists are cached too) ----------
+function bigPut_(key, str, sec) {
+  const n = Math.ceil(str.length / 30000) || 1, o = {};
+  for (let i = 0; i < n; i++) o[key + '#' + i] = str.slice(i * 30000, (i + 1) * 30000);
+  o[key + '#n'] = String(n);
+  CACHE.putAll(o, sec);
+}
+function bigGet_(key) {
+  const n = Number(CACHE.get(key + '#n')); if (!n) return null;
+  const keys = []; for (let i = 0; i < n; i++) keys.push(key + '#' + i);
+  const o = CACHE.getAll(keys); let s = '';
+  for (let i = 0; i < n; i++) { const p = o[key + '#' + i]; if (p == null) return null; s += p; }
+  return s;
+}
+
+let LOGSS_ = null;
+function tab_(name, headers) {
+  const ss = LOGSS_ || (LOGSS_ = SpreadsheetApp.openById(LOG_SS));
+  let sh = ss.getSheetByName(name);
+  if (!sh) { sh = ss.insertSheet(name); sh.appendRow(headers); sh.setFrozenRows(1); }
+  else if (sh.getLastColumn() < headers.length) {
+    // Only the missing header cells are added; existing headers are never overwritten.
+    const lc = Math.max(0, sh.getLastColumn());
+    if (sh.getMaxColumns() < headers.length) sh.insertColumnsAfter(sh.getMaxColumns(), headers.length - sh.getMaxColumns());
+    sh.getRange(1, lc + 1, 1, headers.length - lc).setValues([headers.slice(lc)]);
+  }
+  return sh;
+}
+const norm_ = s => String(s).replace(/\s+/g, ' ').trim().toLowerCase();
+function lock_() {
+  const l = LockService.getScriptLock();
+  try { l.waitLock(15000); } catch (e) { throw new Error('The system is busy right now. Please try again in a moment.'); }
+  return l;
+}
+
+// Called by the page in the background as soon as it opens, so the first login is fast.
+function warmup() { try { employees_(); deptCfg_(); } catch (e) {} return true; }
+
+// ---------- Persistent sessions (employee + management) ----------
+// Stored in Script Properties (survives cache eviction) with a CacheService speed layer.
+// A session ends only when the user signs out, the account is removed/deactivated, or it is unused for SESSION_DAYS.
+function sessKey_(t) { return 's:' + t; }
+function newSession_(kind, val) {
+  const token = Utilities.getUuid() + Utilities.getUuid().replace(/-/g, '').slice(0, 12);
+  const rec = JSON.stringify({ k: kind, v: val, exp: Date.now() + SESSION_DAYS * 864e5 });
+  SESSION_PROPS.setProperty(sessKey_(token), rec);
+  CACHE.put(sessKey_(token), rec, 21600);
+  purgeSessionsSometimes_();
+  return token;
+}
+function getSession_(token, kind) {
+  token = String(token || '');
+  if (!/^[0-9a-f-]{36}([0-9a-f]{12})?$/.test(token)) throw new Error(EXPIRED);
+  const key = sessKey_(token);
+  let raw = CACHE.get(key), rec = null, fromCache = !!raw;
+  if (!raw) raw = SESSION_PROPS.getProperty(key);
+  if (raw) { try { rec = JSON.parse(raw); } catch (e) {} }
+  if (!rec && kind === 'mgmt') {
+    // Migrate a session created by the previous version (v6) so managers are not signed out by the update.
+    const em = SESSION_PROPS.getProperty('sess:' + token);
+    if (em) {
+      rec = { k: 'mgmt', v: em, exp: Date.now() + SESSION_DAYS * 864e5 };
+      SESSION_PROPS.setProperty(key, JSON.stringify(rec)); SESSION_PROPS.deleteProperty('sess:' + token);
+    }
+  }
+  if (!rec || rec.k !== kind) throw new Error(EXPIRED);
+  if (rec.exp < Date.now()) { endSession_(token); throw new Error(EXPIRED); }
+  if (rec.exp - Date.now() < (SESSION_DAYS - 1) * 864e5) { // renew at most once a day (sliding window)
+    rec.exp = Date.now() + SESSION_DAYS * 864e5;
+    try { SESSION_PROPS.setProperty(key, JSON.stringify(rec)); } catch (e) {}
+    CACHE.put(key, JSON.stringify(rec), 21600);
+  } else if (!fromCache) CACHE.put(key, JSON.stringify(rec), 21600);
+  return rec.v;
+}
+function endSession_(token) {
+  token = String(token || ''); if (!token) return;
+  CACHE.remove(sessKey_(token)); CACHE.remove('sess:' + token);
+  try { SESSION_PROPS.deleteProperty(sessKey_(token)); SESSION_PROPS.deleteProperty('sess:' + token); } catch (e) {}
+}
+function purgeSessionsSometimes_() { if (CACHE.get('purgeSess')) return; CACHE.put('purgeSess', '1', 21600); try { cleanupSessions(); } catch (e) {} }
+// Removes expired sessions. Runs automatically about every 6 hours on login; may also be set as a daily trigger.
+function cleanupSessions() {
+  const p = SESSION_PROPS.getProperties(), now = Date.now();
+  Object.keys(p).forEach(k => {
+    if (k.indexOf('s:') !== 0) return;
+    try { if (JSON.parse(p[k]).exp < now) SESSION_PROPS.deleteProperty(k); } catch (e) { SESSION_PROPS.deleteProperty(k); }
+  });
+}
+function logoutMgmt(token) { endSession_(token); return true; }
+function logoutEmp(token) { endSession_(token); return true; }
+
+// ---------- Employee ----------
+function dataSheet_() {
+  const ss = SpreadsheetApp.openById(DATA_SS), want = norm_(DATA_TAB), all = ss.getSheets();
+  return all.find(x => norm_(x.getName()) === want) ||
+         all.find(x => x.getLastRow() > 0 && x.getRange(1, 1, 1, Math.min(x.getLastColumn(), 60)).getValues()[0].map(norm_).indexOf('employee id') >= 0);
+}
+function joinIso_(v) {
+  let out = '';
+  if (v instanceof Date) out = iso_(v);
+  else {
+    const s = String(v == null ? '' : v).trim();
+    let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) out = m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+    else if ((m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/))) out = m[3] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[1]).slice(-2);
+    else if (/[A-Za-z]/.test(s)) { const d = new Date(s); if (!isNaN(d)) out = iso_(d); }
+  }
+  return /^20\d\d-\d\d-\d\d$/.test(out) ? out : '';
+}
+// Employee list is cached for 5 minutes (chunked, so it works for any list size).
+function employees_() {
+  const hit = bigGet_('emps'); if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+  const list = loadEmployees_();
+  try { bigPut_('emps', JSON.stringify(list), 300); } catch (e) { Logger.log('emps cache: ' + e.message); }
+  return list;
+}
+function loadEmployees_() {
+  const sh = dataSheet_(); if (!sh) throw new Error('Employee data tab "' + DATA_TAB + '" was not found.');
+  const rows = sh.getDataRange().getValues(), h = rows[0].map(norm_);
+  const c = { id: h.indexOf('employee id'), name: h.indexOf('employee name'), office: h.indexOf('office name'),
+              status: h.findIndex(x => x.indexOf('status') === 0), dept: h.indexOf('department'),
+              team: h.findIndex(x => ['team','team name','sub team','sub-team'].indexOf(x) >= 0),
+              pm: h.indexOf('personal mobile no.'), om: h.indexOf('official mobile no.'),
+              join: h.findIndex(x => x.indexOf('join') >= 0 || x === 'doj') };
+  if (c.id < 0 || c.name < 0 || c.status < 0 || c.dept < 0) throw new Error('Required columns are missing in the employee data tab.');
+  const mailCols = h.map((x, i) => /e-?mail/.test(x) ? i : -1).filter(i => i >= 0);
+  return rows.slice(1).filter(r => norm_(r[c.id])).map(r => ({
+    id: String(r[c.id]).trim(), name: String(r[c.name]), office: String(r[c.office] || ''), dept: String(r[c.dept] || ''),
+    team: c.team >= 0 ? String(r[c.team] || '') : '',
+    email: (mailCols.map(i => String(r[i] || '').trim()).find(v => v.indexOf('@') > 0) || '').toLowerCase(),
+    active: norm_(r[c.status]) === 'active', join: c.join >= 0 ? joinIso_(r[c.join]) : '',
+    phones: [['Personal', c.pm], ['Official', c.om]].map(p => ({ t: p[0], n: p[1] >= 0 ? phone_(r[p[1]]) : '' }))
+      .filter((p, i, a) => p.n && a.findIndex(q => q.n === p.n) === i) }));
+}
+function findEmployee_(id) {
+  const ck = 'emp:' + norm_(id), hit = CACHE.get(ck); if (hit) return JSON.parse(hit);
+  const e = employees_().find(x => norm_(x.id) === norm_(id));
+  if (!e) throw new Error('Employee ID not found. Please check and try again.');
+  if (!e.active) throw new Error('This employee ID is inactive. Please contact HR.');
+  const o = { id: e.id, name: e.name, office: e.office, dept: e.dept };
+  CACHE.put(ck, JSON.stringify(o), 300);
+  return o;
+}
+// Resolves an employee session token to the employee. If the employee was removed/deactivated the session is ended.
+function empFromToken_(token) {
+  const id = getSession_(token, 'emp');
+  try { return findEmployee_(id); }
+  catch (e) {
+    if (/not found|inactive/i.test(String(e.message))) { endSession_(token); throw new Error(EXPIRED); }
+    throw e;
+  }
+}
+function phone_(v) {
+  let d = String(v || '').replace(/\D/g, '');
+  if (d.indexOf('880') === 0) d = d.slice(2);
+  if (d.length === 10 && d[0] === '1') d = '0' + d;
+  return /^01\d{9}$/.test(d) ? d : '';
+}
+const ll_ = loc => [loc && loc.lat != null ? loc.lat : '', loc && loc.lng != null ? loc.lng : ''];
+const iso_ = d => d instanceof Date ? Utilities.formatDate(d, TZ, 'yyyy-MM-dd') : String(d).slice(0, 10);
+// Validates coordinates coming from the browser. Returns {lat,lng} or null (never trusts raw input).
+function cleanLoc_(loc) {
+  if (!loc || loc.lat == null || loc.lng == null || loc.lat === '' || loc.lng === '') return null;
+  const lat = Number(loc.lat), lng = Number(loc.lng);
+  if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  if (lat === 0 && lng === 0) return null;
+  return { lat: Math.round(lat * 1e6) / 1e6, lng: Math.round(lng * 1e6) / 1e6 };
+}
+
+// Reverse geocoding. Returns '' when no address could be found (the app then keeps the coordinates only
+// and never claims a place name that was not actually resolved).
+function geoName_(loc) {
+  if (!loc || loc.lat == null || loc.lng == null || loc.lat === '' || loc.lng === '') return '';
+  const lat = Number(loc.lat), lng = Number(loc.lng);
+  if (isNaN(lat) || isNaN(lng)) return '';
+  const key = 'geo:' + lat.toFixed(4) + ',' + lng.toFixed(4);
+  const hit = CACHE.get(key); if (hit) return hit;
+  let name = '';
+  try {
+    const res = Maps.newGeocoder().setLanguage('en').reverseGeocode(lat, lng);
+    if (res && res.results && res.results.length) {
+      const r = res.results.find(x => x.types && x.types.indexOf('plus_code') < 0) || res.results[0];
+      name = String(r.formatted_address || '').replace(/^[A-Z0-9]{4}\+[A-Z0-9]+,?\s*/, '');
+    }
+  } catch (e) { Logger.log('geoName_: ' + e.message); }
+  if (name) CACHE.put(key, name.slice(0, 400), 21600);
+  return name;
+}
+const fmtTm_ = d => d instanceof Date ? Utilities.formatDate(d, TZ, 'hh:mm a') : '';
+
+function authorize() {
+  MailApp.getRemainingDailyQuota();
+  Maps.newGeocoder().reverseGeocode(23.78, 90.41);
+  DriveApp.getRootFolder();   // v9.3: Drive permission for leave attachments
+  ScriptApp.getProjectTriggers();   // v9.4: permission to manage the auto check-out trigger
+  tab_('Daily_Log', LOG_H); tab_('Leave_Requests', LV_H); usersSheet_(); tab_('Absence_Remarks', RM_H); tab_('Holidays', HD_H); tab_('Force_Checkout_Log', FC_H); tab_('AutoCheckout_Log', AC_H);
+  Logger.log('Authorized');
+}
+function diagnose() {
+  const e = employees_();
+  Logger.log('Data tab: ' + dataSheet_().getName() + ' | employees: ' + e.length + ' | active: ' + e.filter(x => x.active).length);
+  Logger.log('With join date: ' + e.filter(x => x.join).length);
+  Logger.log('Sample: ' + JSON.stringify(e[0]));
+  Logger.log('Day-off employees mapped: ' + Object.keys(weekendMap_()).length);
+  Logger.log('Holidays listed: ' + Object.keys(holidays_()).length);
+  const U = usersTable_();
+  Logger.log('Users: ' + U.users.length + ' | layout: ' + (U.legacy ? 'OLD (no Employee ID column - please migrate)' : 'NEW (Email | Employee ID | Name | Role | Scope)'));
+  Logger.log('Floor/Line Leads with Employee ID: ' + U.users.filter(u => u.empId && LEAD_ROLES.indexOf(roleKey_(u.role)) >= 0).length);
+  U.users.forEach(u => { if (!u.email) Logger.log('WARNING: a Users row has no email: ' + JSON.stringify(u)); });
+  U.users.filter(u => u.empId && !e.find(x => norm_(x.id) === norm_(u.empId))).forEach(u => Logger.log('WARNING: Employee ID not in Data Sheet: ' + u.empId + ' (' + u.email + ')'));
+  Logger.log('Leave_Requests columns: ' + tab_('Leave_Requests', LV_H).getLastColumn() + ' (expected ' + LV_H.length + ')');
+  Logger.log('Active sessions stored: ' + Object.keys(SESSION_PROPS.getProperties()).filter(k => k.indexOf('s:') === 0).length);
+  Logger.log('Daily_Log columns: ' + tab_('Daily_Log', LOG_H).getLastColumn() + ' (expected ' + LOG_H.length + ') | Force_Checkout_Log rows: ' + (tab_('Force_Checkout_Log', FC_H).getLastRow() - 1));
+  Logger.log('Employees with email: ' + e.filter(x => x.email).length);
+  Logger.log('Geocoder test: ' + geoName_({ lat: 23.78, lng: 90.41 }));
+  const pp = periodOfDate_(iso_(new Date()));
+  Logger.log('Current attendance period: ' + pp.start + ' to ' + pp.end + ' (' + pp.days + ' days) | month label: ' + pp.month);
+  diagDeptConfig();
+}
+
+// Only the latest rows are read, so check-in / check-out stays fast as the log grows.
+function tail_(sh, n, nc) {
+  const lr = sh.getLastRow(); if (lr < 2) return { s: 2, v: [] };
+  const s = Math.max(2, lr - n + 1);
+  return { s, v: sh.getRange(s, 1, lr - s + 1, nc).getValues() };
+}
+function openRow_(t, empId) {
+  for (let i = t.v.length - 1; i >= 0; i--) { const r = t.v[i];
+    if (String(r[1]).trim() === String(empId).trim() && r[5] && !r[6]) return { row: t.s + i, checkIn: new Date(r[5]).getTime() }; }
+  return null;
+}
+
+// Strong server-side guard: an employee may have only one open attendance row.
+// Independent of the browser/page state, so reloads, new tabs and logout/login can never reset it.
+function findOpenAttendance_(sh, empId) {
+  const lr = sh.getLastRow();
+  if (lr < 2) return null;
+  const start = Math.max(2, lr - 19999);
+  const rows = sh.getRange(start, 1, lr - start + 1, 7).getValues();
+  const key = String(empId).trim();
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (String(r[1]).trim() === key && r[5] && !r[6]) {
+      const row = start + i;
+      return { row, checkIn: new Date(r[5]).getTime(), date: iso_(r[0]), loc: sh.getRange(row, 9, 1, 6).getValues()[0] };
+    }
+  }
+  return null;
+}
+function lastDone_(t, empId) {
+  for (let i = t.v.length - 1; i >= 0; i--) { const r = t.v[i];
+    if (String(r[1]).trim() === String(empId).trim() && r[6]) return { checkIn: new Date(r[5]).getTime(), checkOut: new Date(r[6]).getTime(), loc: r.slice(8, 14) }; }
+  return null;
+}
+// Has this employee already got an attendance row for this SHIFT date? (used by ONE_CHECKIN_PER_DAY)
+// v9.4: the date passed in is the shift start date (see shiftDateAt_), which is what column A stores.
+function hasToday_(t, empId, today) {
+  for (let i = t.v.length - 1; i >= 0; i--) { const r = t.v[i];
+    if (String(r[1]).trim() === String(empId).trim() && iso_(r[0]) === today) return true; }
+  return false;
+}
+const locInfo_ = a => ({ inHas: a[0] !== '' && a[0] != null, inName: String(a[4] || ''), outHas: a[2] !== '' && a[2] != null, outName: String(a[5] || '') });
+
+// ======================= v9.4 : DEPARTMENT CONFIG (Users!Q:T) + OVERNIGHT SHIFT HELPERS =======================
+// Users tab, columns Q:T (fixed letters, header row 1):
+//   Q = Department Name   R = Reporting Time (clock, e.g. 10:00 PM)   S = Minimum Check out Time (DURATION, e.g. 5 or 5:00)
+//   T = Auto Check out (clock, e.g. 7:00 AM)
+// Values are read as DISPLAYED text, so any cell format (time, duration, plain text) is handled without date/time-zone surprises.
+
+// Clock time -> minutes after midnight (0..1439), or -1 when blank / invalid. Understands "10:00 PM", "7 AM", "07:00:00 AM", "22:00", "7:05", "10 p.m.".
+function parseClock_(v) {
+  let s = String(v == null ? '' : v).trim().toLowerCase().replace(/\./g, '');
+  s = s.replace(/^\d{1,4}[\/-]\d{1,2}[\/-]\d{1,4}[ t]+/, '');            // "12/30/1899 10:00:00 PM" -> "10:00:00 PM"
+  if (!s) return -1;
+  const m = s.match(/^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(am|pm|a|p)?$/);
+  if (!m) return -1;
+  let h = +m[1]; const mi = m[2] ? +m[2] : 0, ap = m[4] ? m[4][0] : '';
+  if (mi > 59) return -1;
+  if (ap) { if (h < 1 || h > 12) return -1; if (ap === 'p' && h < 12) h += 12; if (ap === 'a' && h === 12) h = 0; }
+  else if (h > 23) return -1;
+  return h * 60 + mi;
+}
+// Duration -> hours (number), or null when blank / invalid. A clock time with AM/PM is NOT a duration and returns null.
+// Understands "5", "5.5", "5 hours", "5h", "5:00", "05:00:00", "5h 30m".
+function parseDurationHours_(v) {
+  const s = String(v == null ? '' : v).trim().toLowerCase().replace(/\./g, m => m);
+  if (!s || /[ap]\.?m\.?$/.test(s)) return null;
+  let m = s.match(/^(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)?$/);
+  if (m) { const h = +m[1]; return h > 0 && h <= 24 ? h : null; }
+  m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (m && +m[2] < 60) { const h = +m[1] + +m[2] / 60; return h > 0 && h <= 24 ? h : null; }
+  m = s.match(/^(?:(\d+)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?$/);
+  if (m && (m[1] || m[2])) { const h = (+m[1] || 0) + (+m[2] || 0) / 60; return h > 0 && h <= 24 ? h : null; }
+  return null;
+}
+// Department configuration map, keyed by normalised department name. Cached 5 minutes. Never throws.
+// entry = { dept, rep (minutes|-1), minH (hours|null), auto (minutes|-1), overnight (bool), raw:{r,s,t} }
+// overnight = Reporting Time AND Auto Check out are both valid and the auto check-out clock is not later than the reporting clock
+//             (e.g. report 10:00 PM, auto check-out 7:00 AM -> the shift ends on the next calendar day).
+function deptCfg_() {
+  const hit = bigGet_('deptcfg1'); if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+  const map = {};
+  try {
+    const sh = usersSheet_(), lr = sh.getLastRow(), w = Math.min(4, sh.getMaxColumns() - 16);
+    if (lr >= 2 && w >= 1) {
+      sh.getRange(2, 17, lr - 1, w).getDisplayValues().forEach(r => {
+        const name = String(r[0] || '').trim(), k = norm_(name); if (!k || map[k]) return;
+        const rep = parseClock_(r[1]), auto = parseClock_(r[3]), minH = parseDurationHours_(r[2]);
+        map[k] = { dept: name, rep, minH, auto, overnight: rep >= 0 && auto >= 0 && auto <= rep,
+          raw: { r: String(r[1] || ''), s: String(r[2] || ''), t: String(r[3] || '') } };
+      });
+    }
+  } catch (e) { Logger.log('deptCfg_: ' + e.message); }
+  try { bigPut_('deptcfg1', JSON.stringify(map), 300); } catch (e) {}
+  return map;
+}
+function clearDeptConfigCache() { CACHE.remove('deptcfg1#n'); Logger.log('Department configuration cache cleared'); }
+const cfgOf_ = (dept, CFG) => (CFG || deptCfg_())[norm_(dept || '')] || null;
+// Minimum actual working duration in ms. Users!S (duration) when valid, otherwise the global MIN_HOURS (5).
+function minMsFor_(dept, CFG) {
+  const c = USE_SHEET_MIN_DURATION ? cfgOf_(dept, CFG) : null;
+  return (c && c.minH != null ? c.minH : MIN_HOURS) * 3600000;
+}
+const isoOfMs_ = ms => Utilities.formatDate(new Date(ms), TZ, 'yyyy-MM-dd');
+const minOfDayMs_ = ms => Math.floor(((ms + TZ_MS) % 864e5) / 60000);       // Asia/Dhaka minutes after midnight (ms > 0)
+// Shift START date for a check-in made at ms. Normally the calendar date. For an OVERNIGHT department a check-in made
+// after midnight but before the auto check-out clock (e.g. 00:30 for a 10 PM - 7 AM shift) belongs to the PREVIOUS night's shift.
+function shiftDateAt_(ms, c) {
+  const d = isoOfMs_(ms);
+  return (c && c.overnight && minOfDayMs_(ms) < c.auto) ? addDay_(d, -1) : d;
+}
+// Working Day of a shift = the SHIFT START DATE (the day the employee reported). An overnight shift that starts 11-Oct 10:00 PM and
+// ends 12-Oct 6:00 AM is the working day 11-Oct, and Day Off / weekly off / leave / present are all evaluated on 11-Oct.
+// Check-out on the next calendar date never moves the shift to another day. (Signature kept so every caller stays unchanged.)
+function workingDayFor_(startIso, outMs, c) { return startIso; }
+// Working Day of a Daily_Log row = its Shift Start Date (column A). Always derived from column A, so rows (old or new) are never rewritten.
+function wdOfRow_(r, CFG) { return iso_(r[0]); }
+// The first moment (ms) at or after which the clock time `min` (minutes after midnight, Asia/Dhaka) occurs strictly after `ms`.
+function nextClockAfter_(ms, min) {
+  const local = ms + TZ_MS, dayStart = Math.floor(local / 864e5) * 864e5;
+  let cand = dayStart + min * 60000;
+  if (cand <= local) cand += 864e5;
+  return cand - TZ_MS;
+}
+// Run from the editor to see how every department row of Users!Q:T was understood.
+function diagDeptConfig() {
+  const sh = usersSheet_(), hdr = sh.getMaxColumns() >= 20 ? sh.getRange(1, 17, 1, 4).getDisplayValues()[0] : [];
+  Logger.log('Users Q:T headers: ' + JSON.stringify(hdr) + ' (expected: Department Name | Reporting Time | Minimum Check out Time | Auto Check out)');
+  clearDeptConfigCache();
+  const C = deptCfg_(), keys = Object.keys(C);
+  Logger.log('Departments configured: ' + keys.length);
+  const hm = m => m < 0 ? 'INVALID/BLANK' : ('0' + Math.floor(m / 60)).slice(-2) + ':' + ('0' + m % 60).slice(-2);
+  keys.forEach(k => { const c = C[k];
+    Logger.log('"' + c.dept + '": Reporting ' + hm(c.rep) + ' [' + c.raw.r + '] | Min duration ' + (c.minH != null ? c.minH + ' h' : 'INVALID/BLANK -> ' + MIN_HOURS + ' h default') + ' [' + c.raw.s + '] | Auto check-out ' + hm(c.auto) + ' [' + c.raw.t + '] | overnight: ' + c.overnight);
+    if (c.auto >= 0 && c.minH != null && !c.overnight) Logger.log('   note: day-shift department; auto check-out is the same-day clock ' + hm(c.auto));
+  });
+  const emps = employees_().filter(e => e.active), miss = {};
+  emps.forEach(e => { if (!C[norm_(e.dept)]) miss[e.dept] = (miss[e.dept] || 0) + 1; });
+  Object.keys(miss).forEach(d => Logger.log('WARNING: department "' + d + '" (' + miss[d] + ' active employees) has no row in Users!Q:T -> normal day-based rules, no auto check-out.'));
+}
+
+const fmtD_ = d => d instanceof Date ? Utilities.formatDate(d, TZ, 'dd-MMM-yy') : d;
+const dstr_ = iso => Utilities.formatDate(new Date(iso + 'T12:00:00Z'), TZ, 'dd-MMM-yy');
+const policy_ = () => ({ types: LEAVE_TYPES, maxDays: MAX_LEAVE_DAYS, backDays: BACKDATE_DAYS, excludeOff: LEAVE_EXCLUDE_OFFDAYS, attachMb: ATTACH_MAX_MB, attachExt: ATTACH_EXT });
+
+// Employee's own leave history (never anyone else's).
+function myLeaves_(empId) {
+  const t = tail_(tab_('Leave_Requests', LV_H), 2000, LV_H.length);
+  const ctx = LEAVE_EXCLUDE_OFFDAYS ? { wk: weekendMap_()[norm_(empId)] || '', hol: holidays_() } : null;
+  return t.v.filter(r => norm_(r[2]) === norm_(empId)).reverse().slice(0, 50).map(r => {
+    const f = iso_(r[5]), to = iso_(r[6]), fin = String(r[12] || 'Pending');
+    return { id: r[0], type: String(r[14] || ''), from: fmtD_(r[5]), to: fmtD_(r[6]), fi: f, ti: to,
+      duration: leaveCount_(empId, f, to, ctx).days, at: fmtT_(r[1]), reason: r[7], emerg: r[8],
+      st: [r[9], r[10], r[11]], final: fin, remarks: String(r[13] || ''), att: String(r[15] || ''), canCancel: fin === 'Pending' };
+  });
+}
+
+// noLv = true for check-in / check-out: the page already has the leave list, so we skip that extra sheet read.
+// v9.4: minMs follows the employee's department (Users!S duration, default 5 h).
+function st_(emp, checkIn, last, noLv, doneToday) {
+  const o = { emp, now: Date.now(), today: iso_(new Date()), minMs: minMsFor_(emp.dept), checkIn, last,
+    doneToday: !!doneToday, locReq: LOCATION_REQUIRED, policy: policy_() };
+  if (!noLv) o.leaves = myLeaves_(emp.id);
+  return o;
+}
+// Always rebuilt from the server log. Never depends on browser/local state.
+function state_(emp) {
+  const sh = tab_('Daily_Log', LOG_H), open = findOpenAttendance_(sh, emp.id);
+  if (open) { const o = st_(emp, open.checkIn, null, false, false); o.place = locInfo_(open.loc); return o; }
+  const t = tail_(sh, 3000, LOG_H.length), last = lastDone_(t, emp.id);
+  const o = st_(emp, null, last, false, ONE_CHECKIN_PER_DAY && hasToday_(t, emp.id, shiftDateAt_(Date.now(), cfgOf_(emp.dept))));
+  o.place = last ? locInfo_(last.loc) : null;
+  return o;
+}
+// Employee sign-in: returns a persistent session token together with the current attendance state.
+function login(empId) {
+  const emp = findEmployee_(empId), token = newSession_('emp', emp.id), s = state_(emp);
+  s.token = token; return s;
+}
+// Called on page reload: validates the stored token and returns the live attendance state.
+function resume(token) { return state_(empFromToken_(token)); }
+
+// Location name is NOT looked up here (slow). The app calls fillPlace() right after, in the background.
+function checkIn(token, loc) {
+  const emp = empFromToken_(token), L = cleanLoc_(loc);
+  if (LOCATION_REQUIRED && !L) throw new Error('Location is required for check-in. Please allow location access and try again.');
+  const cfg = cfgOf_(emp.dept);
+  const lock = lock_(); let now, note = '';
+  try {
+    const sh = tab_('Daily_Log', LOG_H), shiftToday = shiftDateAt_(Date.now(), cfg);
+    if (findOpenAttendance_(sh, emp.id)) note = 'already_in';           // open shift exists in the sheet
+    else if (ONE_CHECKIN_PER_DAY && hasToday_(tail_(sh, 3000, 7), emp.id, shiftToday)) note = 'done_today';
+    else {
+      now = new Date();
+      const row = sh.getLastRow() + 1, p = ll_(L), startDate = shiftDateAt_(now.getTime(), cfg);   // v9.4: Date column = Shift Start Date
+      sh.getRange(row, 1, 1, LOG_H.length).setValues([[startDate, emp.id, emp.name, emp.office, emp.dept, now, '', '', p[0], p[1], '', '', '', '', '', '', '', workingDayFor_(startDate, null, cfg)]]);
+      SpreadsheetApp.flush();
+      const chk = sh.getRange(row, 1, 1, 7).getValues()[0];             // read back: confirm it really was saved
+      if (String(chk[1]).trim() !== emp.id || !chk[5]) throw new Error('Check-in could not be saved. Please try again.');
+    }
+  } finally { lock.releaseLock(); }
+  if (note) { const s = state_(emp); s.note = note; return s; }
+  const s = st_(emp, now.getTime(), null, true, false);
+  s.place = { inHas: !!L, inName: '', outHas: false, outName: '' }; s.note = 'ok';
+  return s;
+}
+
+function checkOut(token, loc) {
+  const emp = empFromToken_(token), L = cleanLoc_(loc);
+  if (LOCATION_REQUIRED && !L) throw new Error('Location is required for check-out. Please allow location access and try again.');
+  const cfg = cfgOf_(emp.dept), minMs = minMsFor_(emp.dept);
+  const lock = lock_(); let open, now, note = '';
+  try {
+    const sh = tab_('Daily_Log', LOG_H); open = findOpenAttendance_(sh, emp.id);
+    if (!open) note = 'not_in';
+    else {
+      now = Date.now(); const el = now - open.checkIn;      // full timestamps: midnight crossing is handled automatically
+      if (el < minMs) {
+        const m = Math.ceil((minMs - el) / 60000);
+        throw new Error('Check-out unlocks in ' + Math.floor(m / 60) + 'h ' + (m % 60) + 'm.');
+      }
+      sh.getRange(open.row, 7, 1, 2).setValues([[new Date(now), Math.round(el / 36000) / 100]]);
+      sh.getRange(open.row, 11, 1, 2).setValues([ll_(L)]);
+      sh.getRange(open.row, 15).setValue('Employee');
+      sh.getRange(open.row, 18).setValue(workingDayFor_(open.date, now, cfg));   // v9.4: Working Day
+      SpreadsheetApp.flush();
+      if (!sh.getRange(open.row, 7).getValue()) throw new Error('Check-out could not be saved. Please try again.');
+    }
+  } finally { lock.releaseLock(); }
+  if (note) { const s = state_(emp); s.note = note; return s; }
+  const s = st_(emp, null, { checkIn: open.checkIn, checkOut: now }, true, ONE_CHECKIN_PER_DAY && open.date === shiftDateAt_(Date.now(), cfg));
+  const pl = locInfo_(open.loc); pl.outHas = !!L; pl.outName = ''; s.place = pl; s.note = 'ok';
+  return s;
+}
+
+// Background job: fills the place name for the employee's latest row. Returns '' when no address could be resolved.
+function fillPlace(token) {
+  const emp = empFromToken_(token), sh = tab_('Daily_Log', LOG_H), t = tail_(sh, 300, LOG_H.length);
+  for (let i = t.v.length - 1; i >= 0; i--) {
+    const r = t.v[i]; if (norm_(r[1]) !== norm_(emp.id)) continue;
+    const row = t.s + i;
+    let inName = String(r[12] || ''), outName = String(r[13] || '');
+    if (r[8] !== '' && !inName) {
+      inName = geoName_({ lat: r[8], lng: r[9] });
+      if (inName) sh.getRange(row, 13).setValue(inName);
+    }
+    if (r[10] !== '' && !outName) {
+      outName = geoName_({ lat: r[10], lng: r[11] });
+      if (outName) sh.getRange(row, 14).setValue(outName);
+    }
+    return { inLocation: inName, outLocation: outName };
+  }
+  return { inLocation: '', outLocation: '' };
+}
+
+// Employee's own period summary + recent records (loaded when the Summary tab opens).
+// v9.1: "this month" is now the current attendance period (21st to 20th).
+// v9.4: days are counted by Working Day.
+function mySummary(token) {
+  const emp = empFromToken_(token), sh = tab_('Daily_Log', LOG_H), P = periodOfDate_(iso_(new Date())), lr = sh.getLastRow(), CFG = deptCfg_();
+  const days = {}, rows = []; let hrs = 0, n = 0;
+  if (lr >= 2) {
+    const st = Math.max(2, lr - 19999), v = sh.getRange(st, 1, lr - st + 1, LOG_H.length).getValues();
+    for (let i = v.length - 1; i >= 0; i--) {
+      const r = v[i]; if (norm_(r[1]) !== norm_(emp.id)) continue;
+      const d = wdOfRow_(r, CFG);
+      if (d < P.start && rows.length >= 10) break;
+      if (d >= P.start && d <= P.end) { days[d] = 1; if (typeof r[7] === 'number' && r[7] > 0) { hrs += r[7]; n++; } }
+      if (rows.length < 10) rows.push({ d, forced: r[14] === FORCE_METHOD, inT: fmtTm_(r[5]), outT: fmtTm_(r[6]), hrs: typeof r[7] === 'number' ? r[7] : null,
+        inLoc: r[12] || (r[8] !== '' ? r[8] + ', ' + r[9] : ''), outLoc: r[13] || (r[10] !== '' ? r[10] + ', ' + r[11] : ''),
+        inLL: r[8] !== '' ? r[8] + ',' + r[9] : '', outLL: r[10] !== '' ? r[10] + ',' + r[11] : '' });
+    }
+  }
+  return { month: P.month, from: P.start, to: P.end, days: Object.keys(days).length, hours: Math.round(hrs * 10) / 10, avg: n ? Math.round(hrs / n * 10) / 10 : 0, rows };
+}
+
+// ---------- Leave ----------
+function leaveDays_(from, to) {
+  const f = joinIso_(from), t = joinIso_(to);
+  if (!f || !t || t < f) return 0;
+  return Math.floor((new Date(t + 'T12:00:00Z') - new Date(f + 'T12:00:00Z')) / 86400000) + 1;
+}
+// Duration under the company policy (see LEAVE_EXCLUDE_OFFDAYS).
+function leaveCount_(empId, from, to, ctx) {
+  const f = joinIso_(from), t = joinIso_(to), cal = leaveDays_(f, t);
+  if (!LEAVE_EXCLUDE_OFFDAYS || !cal) return { days: cal, calendar: cal, skipped: 0 };
+  ctx = ctx || { wk: weekendMap_()[norm_(empId)] || '', hol: holidays_() };
+  let n = 0;
+  for (let d = f; d <= t; d = addDay_(d, 1)) { if (ctx.hol[d] || (ctx.wk && ctx.wk.indexOf(String(dowOf_(d))) >= 0)) continue; n++; }
+  return { days: n, calendar: cal, skipped: cal - n };
+}
+function leavePreview(token, from, to) {
+  const emp = empFromToken_(token), f = joinIso_(from), t = joinIso_(to);
+  if (!f || !t || t < f) throw new Error('Please select valid leave dates.');
+  return leaveCount_(emp.id, f, t);
+}
+
+// A stage that is not waiting any more (approved, or bypassed for Lead requests).
+const stageDone_ = x => x === 'Approved' || x === SKIPPED;
+
+// ---------- Leave attachment helpers (v9.3) ----------
+// Checks the optional file sent by the browser. Returns null when no file was sent, otherwise {name, ext, bytes}.
+function prepAttachment_(att) {
+  if (!att || !att.data) return null;
+  let name = String(att.name || 'attachment').replace(/[^\w.\- ]+/g, '_').replace(/\s+/g, ' ').trim().slice(-80) || 'attachment';
+  const ext = (name.indexOf('.') >= 0 ? name.split('.').pop() : '').toLowerCase();
+  if (ATTACH_EXT.indexOf(ext) < 0) throw new Error('This file type is not allowed. Please attach a PDF, JPG, PNG, DOC or DOCX file.');
+  let bytes;
+  try { bytes = Utilities.base64Decode(String(att.data)); }
+  catch (e) { throw new Error('The attachment could not be read. Please choose the file again.'); }
+  if (!bytes || !bytes.length) throw new Error('The attachment is empty. Please choose the file again.');
+  if (bytes.length > ATTACH_MAX_MB * 1048576) throw new Error('The attachment is too large. Maximum size is ' + ATTACH_MAX_MB + ' MB.');
+  return { name, ext, bytes };
+}
+// The Drive folder is created once (in the script owner's My Drive) and its id is remembered.
+function attFolder_() {
+  const id = SESSION_PROPS.getProperty('ATT_FOLDER_ID');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) {} }
+  const f = DriveApp.createFolder(ATTACH_FOLDER_NAME);
+  SESSION_PROPS.setProperty('ATT_FOLDER_ID', f.getId());
+  return f;
+}
+// Saves the file in Drive and returns its link (stored in the Leave_Requests "Attachment" column).
+function putAttachment_(p, reqId, emp) {
+  let file;
+  try { file = attFolder_().createFile(Utilities.newBlob(p.bytes, ATTACH_MIME[p.ext], reqId + '_' + emp.id + '_' + p.name)); }
+  catch (e) { Logger.log('putAttachment_: ' + e.message); throw new Error('The attachment could not be saved. Please try again, or submit without it.'); }
+  try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); }
+  catch (e) { try { file.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW); } catch (e2) { Logger.log('attachment sharing: ' + e2.message); } }
+  return file.getUrl();
+}
+
+// v9.3: att (optional) = { name, type, data (base64) }
+function requestLeave(token, from, to, reason, emergency, type, att) {
+  const emp = empFromToken_(token);
+  const f = String(from || '').trim(), t = String(to || '').trim(), ty = String(type || '').trim();
+  let why = String(reason || '').trim();
+  if (!f || !t || !why) throw new Error('Please provide From date, To date and a reason.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(f) || !/^\d{4}-\d{2}-\d{2}$/.test(t)) throw new Error('Please select valid leave dates.');
+  if (t < f) throw new Error('The end date cannot be before the start date.');
+  if (LEAVE_TYPES.indexOf(ty) < 0) throw new Error('Please select a leave type.');
+  why = why.slice(0, 500);
+  const today = iso_(new Date());
+  if (f < addDay_(today, -BACKDATE_DAYS)) throw new Error('Leave cannot start more than ' + BACKDATE_DAYS + ' days in the past.');
+  const cal = leaveDays_(f, t);
+  if (cal < 1) throw new Error('Please select a valid leave duration.');
+  if (cal > MAX_LEAVE_DAYS) throw new Error('A single leave request cannot be longer than ' + MAX_LEAVE_DAYS + ' days.');
+  const cnt = leaveCount_(emp.id, f, t);
+  if (cnt.days < 1) throw new Error('All selected dates are weekly days off or holidays, so no leave is needed.');
+  const prep = prepAttachment_(att);   // v9.3: optional file, checked before anything is saved
+
+  // v8: Floor Lead / Line Lead requests go directly to Manager approval (Floor Lead and Line Lead stages are skipped).
+  const lead = leadUserOf_(emp.id), direct = !!lead;
+  const stages = direct ? [SKIPPED, SKIPPED, 'Pending'] : ['Pending', 'Pending', 'Pending'];
+  const routeNote = direct ? 'Submitted by ' + (roleKey_(lead.role) === 'floorlead' ? 'Floor Lead' : 'Line Lead') + ': sent directly to Manager approval.' : '';
+
+  const lock = lock_(); let rec = null;
+  try {
+    const sh = tab_('Leave_Requests', LV_H), lastRow = sh.getLastRow();
+    // Overlap rule (server-side, from the sheet): a Pending or Approved request blocks the same dates.
+    // Rejected / Cancelled requests do NOT block, so the employee can apply again.
+    if (lastRow >= 2) {
+      const rows = sh.getRange(2, 1, lastRow - 1, LV_H.length).getValues();
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (norm_(r[2]) !== norm_(emp.id)) continue;
+        const fin = String(r[12] || 'Pending');
+        if (fin !== 'Pending' && fin !== 'Approved') continue;
+        const ef = iso_(r[5]), et = iso_(r[6]); if (!ef || !et) continue;
+        if (f <= et && t >= ef) {
+          // Same request sent twice within 2 minutes (double tap / retry): treat as already submitted.
+          if (ef === f && et === t && fin === 'Pending' && r[1] instanceof Date && Date.now() - r[1].getTime() < 120000)
+            { rec = { id: r[0], at: fmtT_(r[1]), status: fin, dup: true, att: '' }; break; }
+          throw new Error('A ' + fin + ' leave request (' + r[0] + ') already exists for ' + (ef === et ? ef : ef + ' to ' + et) + '. You cannot request the same date twice.');
+        }
+      }
+    }
+    if (!rec) {
+      const now = new Date(), id = 'LV-' + Utilities.formatDate(now, TZ, 'yyMMdd-HHmmss') + '-' + Utilities.getUuid().slice(0, 4).toUpperCase();
+      const attUrl = prep ? putAttachment_(prep, id, emp) : '';
+      const row = sh.getLastRow() + 1;
+      sh.getRange(row, 1, 1, LV_H.length).setValues([[id, now, emp.id, emp.name, emp.dept, f, t, why,
+        emergency === true || String(emergency).toLowerCase() === 'true' ? 'Yes' : 'No', stages[0], stages[1], stages[2], 'Pending', routeNote, ty, attUrl]]);
+      SpreadsheetApp.flush();
+      if (String(sh.getRange(row, 1).getValue()) !== id) throw new Error('Your leave request could not be saved. Please try again.');
+      rec = { id, at: fmtT_(now), status: 'Pending', dup: false, att: attUrl };
+    }
+  } finally { lock.releaseLock(); }
+  const s = state_(emp);
+  s.submitted = { id: rec.id, at: rec.at, status: rec.status, from: dstr_(f), to: dstr_(t), duration: cnt.days, type: ty, dup: rec.dup, direct, waiting: direct ? 'Manager' : 'Floor Lead',
+    att: rec.att ? (prep ? prep.name : 'Attached') : '' };
+  return s;
+}
+
+// Employee may cancel their own request while it is still Pending (no final decision yet).
+function cancelLeave(token, reqId) {
+  const emp = empFromToken_(token), lock = lock_();
+  try {
+    const sh = tab_('Leave_Requests', LV_H), r = sh.getDataRange().getValues();
+    for (let i = 1; i < r.length; i++) if (r[i][0] === reqId) {
+      if (norm_(r[i][2]) !== norm_(emp.id)) throw new Error('Request not found.');
+      if (String(r[i][12] || 'Pending') !== 'Pending') throw new Error('Only a pending request can be cancelled.');
+      const note = (r[i][13] ? r[i][13] + '\n' : '') + 'Cancelled by employee';
+      sh.getRange(i + 1, 13, 1, 2).setValues([['Cancelled', note]]);
+      SpreadsheetApp.flush();
+      return state_(emp);
+    }
+    throw new Error('Request not found.');
+  } finally { lock.releaseLock(); }
+}
+
+// ---------- Users sheet (v8 layout: Email | Employee ID | Name | Role | Scope) ----------
+// The Users sheet is created if missing, but an existing one is NEVER modified automatically.
+function usersSheet_() {
+  const ss = LOGSS_ || (LOGSS_ = SpreadsheetApp.openById(LOG_SS));
+  let sh = ss.getSheetByName('Users');
+  if (!sh) { sh = ss.insertSheet('Users'); sh.appendRow(US_H); sh.setFrozenRows(1); }
+  return sh;
+}
+// Columns are found by header name. If the sheet still has the old layout (no "Employee ID" header)
+// the old positions are used so nobody is locked out; Lead routing then stays off until the sheet is migrated.
+function usersTable_() {
+  const v = usersSheet_().getDataRange().getValues();
+  if (!v.length) return { users: [], legacy: false };
+  const h = v[0].map(norm_), legacy = h.indexOf('employee id') < 0;
+  const pos = legacy ? { email: 0, empId: -1, name: 1, role: 2, scope: 3 } : { email: 0, empId: 1, name: 2, role: 3, scope: 4 };
+  const col = (hdr, key) => { const i = h.indexOf(hdr); return i >= 0 ? i : pos[key]; };
+  const c = { email: col('email', 'email'), empId: legacy ? -1 : col('employee id', 'empId'), name: col('name', 'name'), role: col('role', 'role'), scope: col('scope', 'scope') };
+  const users = v.slice(1).filter(r => String(r[c.email] || '').trim()).map(r => ({
+    email: String(r[c.email]).trim(), empId: c.empId >= 0 ? String(r[c.empId] || '').trim() : '',
+    name: String(r[c.name] || '').trim(), role: String(r[c.role] || '').trim(), scope: String(r[c.scope] || 'ALL').trim() || 'ALL' }));
+  return { users, legacy };
+}
+function roleKey_(r) { return String(r || '').replace(/\s+/g, '').toLowerCase(); }
+function userByEmail_(email) { return usersTable_().users.find(x => norm_(x.email) === norm_(email)) || null; }
+// If this employee is listed in Users as Floor Lead or Line Lead, returns that user (otherwise null).
+function leadUserOf_(empId) {
+  const k = norm_(empId); if (!k) return null;
+  return usersTable_().users.find(u => u.empId && norm_(u.empId) === k && LEAD_ROLES.indexOf(roleKey_(u.role)) >= 0) || null;
+}
+
+// ---------- Management login (email + OTP) ----------
+function sendOtp(email) {
+  email = String(email || '').trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('Please enter a valid email address.');
+  if (!userByEmail_(email)) throw new Error('This email is not authorized. Please contact your administrator.');
+  if (CACHE.get('otpwait:' + email)) throw new Error('Please wait a minute before requesting another code.');
+  const code = ('' + Math.floor(100000 + Math.random() * 900000));
+  CACHE.put('otp:' + email, code, 600);
+  CACHE.put('otpwait:' + email, '1', 60);
+  CACHE.remove('otptry:' + email);
+  MailApp.sendEmail(email, 'Your attendance sign-in code: ' + code, 'Your sign-in code is ' + code + '.\n\nIt is valid for 10 minutes. If you did not request it, you can ignore this email.');
+  return true;
+}
+function verifyOtp(email, code) {
+  email = String(email || '').trim().toLowerCase();
+  const tries = Number(CACHE.get('otptry:' + email) || 0);
+  if (tries >= 5) throw new Error('Too many incorrect attempts. Please request a new code.');
+  if (!CACHE.get('otp:' + email) || String(code).trim() !== CACHE.get('otp:' + email)) {
+    CACHE.put('otptry:' + email, String(tries + 1), 600);
+    throw new Error('Invalid or expired code.');
+  }
+  CACHE.remove('otp:' + email);
+  const token = newSession_('mgmt', email);   // persistent: stays signed in across reloads until sign-out
+  return { token, data: portalData(token) };
+}
+// The user record is cached for 2 minutes, so every portal call does not re-read the Users tab.
+function user_(token) {
+  const email = getSession_(token, 'mgmt');
+  const ck = 'usr:' + norm_(email), hit = CACHE.get(ck);
+  let u = null;
+  if (hit) { try { u = JSON.parse(hit); } catch (e) {} }
+  if (!u) { u = userByEmail_(email); if (u) CACHE.put(ck, JSON.stringify(u), 120); }
+  if (!u) { endSession_(token); throw new Error(EXPIRED); }   // user removed from the Users tab
+  return u;
+}
+
+function scopeList_(u) { return String(u.scope || 'ALL').split(/[;,|]/).map(norm_).filter(Boolean); }
+function inScope_(u, dept, team) {
+  const l = scopeList_(u);
+  if (l.indexOf('all') >= 0) return true;
+  return [dept, team].map(norm_).filter(Boolean).some(v => l.indexOf(v) >= 0);
+}
+function role_(u) { return roleKey_(u.role); }
+function stageIndex_(u) {
+  const r = role_(u);
+  if (r === 'floorlead') return STAGE.FloorLead;
+  if (r === 'linelead') return STAGE.LineLead;
+  if (r === 'manager') return STAGE.Manager;
+  return undefined;
+}
+
+// v9.2: the weekly day-off (Weekend) is read from the monthly tabs of the Attendance Report sheet.
+//   - The tabs of the requested month label are found by name ("Oct 26 (Operator)", "Oct 26 (Management)" ...),
+//     so a new month's tabs are picked up automatically. See PERIOD_LABEL_BY_END for how a period gets its month name.
+//   - ALL tabs of that month are read (Operator + Management) and merged. If an ID is found again, the first value
+//     is kept: nothing is ever overwritten.
+//   - If the month's tabs do not exist yet, the latest earlier month (up to 3 back) is used.
+//   - The result is cached for 10 minutes per month, so a changed Weekend is picked up quickly.
+const WK_MON_ = [/\bjan(uary)?\b/, /\bfeb(ruary)?\b/, /\bmar(ch)?\b/, /\bapr(il)?\b/, /\bmay\b/, /\bjun(e)?\b/,
+                 /\bjul(y)?\b/, /\baug(ust)?\b/, /\bsep(t(ember)?)?\b/, /\boct(ober)?\b/, /\bnov(ember)?\b/, /\bdec(ember)?\b/];
+function tabsOfMonth_(ss, month) {
+  const mi = +month.slice(5, 7) - 1, y4 = month.slice(0, 4), y2 = y4.slice(2);
+  const yr = new RegExp('(^|[^0-9])(' + y4 + '|' + y2 + ')([^0-9]|$)');
+  return ss.getSheets().filter(s => {
+    const n = norm_(s.getName());
+    return WK_MON_[mi].test(n) && (!/\d\d/.test(n) || yr.test(n));   // name has the month, and (if it shows a year) the same year
+  });
+}
+// Adds this tab's employees to map. Existing entries are never changed.
+function readWeekendTab_(sh, map) {
+  const names = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'], lr = sh.getLastRow(), lc = Math.min(sh.getLastColumn(), 60);
+  if (lr < 1 || lc < 1) return;
+  const all = sh.getRange(1, 1, lr, lc).getValues();
+  let ic = colIdx_(WK_ID_COL), wc = colIdx_(WK_DAY_COL), from = 0;
+  for (let r = 0; r < Math.min(12, all.length); r++) {          // header row: "ID" / "Employee ID" and a column starting with "week"
+    const h = all[r].map(norm_), i = h.findIndex(x => x === 'id' || x === 'employee id'), w = h.findIndex(x => x.indexOf('week') === 0);
+    if (i >= 0 && w >= 0) { ic = i; wc = w; from = r + 1; break; }
+  }
+  if (ic >= lc || wc >= lc) return;
+  for (let r = from; r < all.length; r++) {
+    const k = norm_(all[r][ic]); if (!k || k === 'id' || k === 'employee id' || map[k]) continue;
+    const t = String(all[r][wc] == null ? '' : all[r][wc]).toLowerCase();
+    const d = names.map((n, i) => t.indexOf(n) >= 0 ? i : -1).filter(i => i >= 0);
+    if (d.length) map[k] = d.join('');
+  }
+}
+// month = 'yyyy-MM' month label (see PERIOD_LABEL_BY_END). Without it, the current period's month is used.
+function weekendMap_(month) {
+  month = /^\d{4}-\d{2}$/.test(month || '') ? month : periodOfDate_(iso_(new Date())).month;
+  const ck = 'wkmap3:' + month, hit = bigGet_(ck); if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+  const map = {};
+  try {
+    const ss = SpreadsheetApp.openById(ATT_SS);
+    let m = month, tabs = [];
+    for (let back = 0; back < 4; back++) { tabs = tabsOfMonth_(ss, m); if (tabs.length) break; m = ymAdd_(m, -1); }
+    if (!tabs.length) Logger.log('weekendMap_: no Attendance Report tab found for ' + month + ' (or the 3 months before).');
+    else { if (m !== month) Logger.log('weekendMap_: tabs for ' + month + ' not found, using ' + m); tabs.forEach(sh => readWeekendTab_(sh, map)); }
+  } catch (e) { Logger.log('weekendMap_: ' + e.message); }
+  if (Object.keys(map).length) { try { bigPut_(ck, JSON.stringify(map), 600); } catch (e) {} }
+  return map;
+}
+// Optional: run from the editor to force the Weekend data to be re-read immediately.
+function clearWeekendCache() {
+  for (let i = 0; i < 4; i++) CACHE.remove('wkmap3:' + ymAdd_(periodOfDate_(iso_(new Date())).month, -i) + '#n');
+  Logger.log('Weekend cache cleared');
+}
+
+// Company holidays: add rows (Date, Name) in the "Holidays" tab of the Check-in & Check-out Dashboard sheet.
+function holidays_() {
+  const sh = tab_('Holidays', HD_H), lr = sh.getLastRow(), m = {};
+  (lr >= 2 ? sh.getRange(2, 1, lr - 1, 2).getValues() : []).forEach(x => {
+    const d = x[0] ? joinIso_(x[0]) : ''; if (d) m[d] = String(x[1] || 'Holiday'); });
+  return m;
+}
+
+const dowOf_ = iso => new Date(iso + 'T12:00:00Z').getUTCDay();
+const addDay_ = (iso, n) => { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+
+// ---------- Attendance / Salary period helpers (v9.1) ----------
+// ymAdd_('2026-12', 1) -> '2027-01'   (works across years and for any month length)
+const ymAdd_ = (ym, n) => {
+  let y = +ym.slice(0, 4), m = +ym.slice(5, 7) - 1 + n;
+  y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+  return y + '-' + ('0' + (m + 1)).slice(-2);
+};
+// The period that contains the given date (yyyy-mm-dd).
+// Example: 2026-10-11 -> { start:'2026-09-21', end:'2026-10-20', month:'2026-10' (label), days:30 }
+function periodOfDate_(iso) {
+  const ym = iso.slice(0, 7), day = +iso.slice(8, 10);
+  const sYm = day >= PERIOD_START_DAY ? ym : ymAdd_(ym, -1), eYm = ymAdd_(sYm, 1);
+  const start = sYm + '-' + ('0' + PERIOD_START_DAY).slice(-2), end = eYm + '-' + ('0' + (PERIOD_START_DAY - 1)).slice(-2);
+  return { start, end, month: PERIOD_LABEL_BY_END ? eYm : sYm, days: leaveDays_(start, end) };
+}
+// The period that carries the given month label (yyyy-MM), see PERIOD_LABEL_BY_END.
+function periodOfMonth_(month) {
+  const sYm = PERIOD_LABEL_BY_END ? ymAdd_(month, -1) : month;
+  return periodOfDate_(sYm + '-' + ('0' + PERIOD_START_DAY).slice(-2));
+}
+
+// Period-to-date summary for one employee (from the later of period start / joining date, up to date D).
+function monthStats_(k, e, D, pd, wk, lvr) {
+  const P = periodOfDate_(D), mStart = P.start, start = e.join && e.join > mStart ? e.join : mStart;
+  const s = { monthDays: P.days, span: 0, present: 0, off: 0, leave: 0, absent: 0, work: 0, streak: 0, rate: null, from: start, pStart: P.start, pEnd: P.end };
+  if (start > D) return s;
+  const w = wk[k] || '', PD = pd[k] || {}, L = lvr[k] || [];
+  for (let d = start; d <= D; d = addDay_(d, 1)) {
+    s.span++;
+    if (PD[d]) { s.present++; s.streak = 0; }
+    else if (w && w.indexOf(String(dowOf_(d))) >= 0) s.off++;
+    else if (L.some(x => x[0] <= d && d <= x[1])) { s.leave++; s.streak = 0; }
+    else { s.absent++; s.streak++; }
+  }
+  s.work = s.span - s.off - s.leave;
+  s.rate = s.work > 0 ? Math.min(100, Math.round(s.present / s.work * 1000) / 10) : null;
+  return s;
+}
+
+function safeMs_(k, e, D, pd, wk, lvr) {
+  try { return monthStats_(k, e, D, pd, wk, lvr); }
+  catch (x) { Logger.log('monthStats_ ' + e.id + ': ' + x.message); return { monthDays: 30, span: 0, present: 0, off: 0, leave: 0, absent: 0, work: 0, streak: 0, rate: null, from: D }; }
+}
+
+// v9.4: attendance is grouped by WORKING DAY (= shift start date). Day-off / weekly-off / leave are evaluated on that same day.
+function portalData(token, dateStr) {
+  const u = user_(token), idx = stageIndex_(u), now = new Date(), today = iso_(now);
+  let D = /^\d{4}-\d{2}-\d{2}$/.test(dateStr || '') ? dateStr : today; if (D > today) D = today;
+  const isToday = D === today, base = Date.parse(D + 'T12:00:00+06:00'), PER = periodOfDate_(D), mStart = PER.start;
+  const dow = Number(Utilities.formatDate(new Date(base), TZ, 'u')) % 7, canCall = role_(u) !== 'viewer';
+  const all = tab_('Leave_Requests', LV_H).getDataRange().getValues().slice(1).filter(r => inScope_(u, r[4]));
+  const emps = employees_().filter(e => e.active && inScope_(u, e.dept, e.team) && !(e.join && e.join > D)), byId = {};
+  emps.forEach(e => byId[norm_(e.id)] = e);
+  const wk = weekendMap_(PER.month), CFG = deptCfg_();
+  const lg = tab_('Daily_Log', LOG_H), lr = lg.getLastRow(), st = Math.max(2, lr - 19999);
+  const logRows = lr >= 2 ? lg.getRange(st, 1, lr - st + 1, LOG_H.length).getValues() : [];
+  const days = []; for (let i = 6; i >= 0; i--) days.push(iso_(new Date(base - i * 864e5)));
+  const per = {}; days.forEach(d => per[d] = {});
+  const present = {}, shift = {}, pd = {}; let hs = 0, hc = 0;
+  const logs = [];
+  logRows.forEach(r => {
+    const k = norm_(r[1]); if (!byId[k]) return;
+    const d = wdOfRow_(r, CFG); if (per[d]) per[d][k] = 1;
+    if (d >= mStart && d <= D) (pd[k] || (pd[k] = {}))[d] = 1;
+    if (isToday && r[5] && !r[6]) { shift[k] = 1; present[k] = 1; }
+    if (d === D) {
+      present[k] = 1; if (typeof r[7] === 'number' && r[7] > 0) { hs += r[7]; hc++; }
+      const e0 = byId[k];
+      logs.push({ id: e0.id, name: e0.name, dept: e0.dept || 'Unassigned', inT: fmtTm_(r[5]), outT: fmtTm_(r[6]), ts: r[5] instanceof Date ? r[5].getTime() : 0, forced: r[14] === FORCE_METHOD, forcedBy: r[14] === FORCE_METHOD ? String(r[15] || '') : '',
+        hrs: typeof r[7] === 'number' ? r[7] : null,
+        inLoc: r[12] || (r[8] !== '' ? r[8] + ', ' + r[9] : ''), outLoc: r[13] || (r[10] !== '' ? r[10] + ', ' + r[11] : ''),
+        inLL: r[8] !== '' ? r[8] + ',' + r[9] : '', outLL: r[10] !== '' ? r[10] + ',' + r[11] : '' });
+    }
+  });
+  const lv = {}, lvr = {};
+  all.forEach(r => { if (r[12] !== 'Approved') return;
+    const f = iso_(r[5]), t = iso_(r[6]), k = norm_(r[2]);
+    (lvr[k] || (lvr[k] = [])).push([f, t]); if (f <= D && D <= t) lv[k] = 1; });
+  const rm = {};
+  tab_('Absence_Remarks', RM_H).getDataRange().getValues().slice(1).forEach(r => {
+    if (iso_(r[0]) === D) rm[norm_(r[1])] = { reason: r[4], outcome: r[5], emerg: r[6], text: r[7], by: r[8], at: fmtT_(r[10]) }; });
+  const dm = {}, T = { total: 0, present: 0, dayOff: 0, leave: 0, absent: 0 }, people = [], lastLog = {};
+  logs.forEach(l => { const kk = norm_(l.id); if (!lastLog[kk] || l.ts > lastLog[kk].ts) lastLog[kk] = l; });
+  emps.forEach(e => {
+    const k = norm_(e.id), name = e.dept || 'Unassigned';
+    const s0 = present[k] ? 'Present' : (wk[k] && wk[k].indexOf(String(dow)) >= 0) ? 'Day off' : lv[k] ? 'Leave' : 'Absent', ll = lastLog[k];
+    people.push({ id: e.id, name: e.name, dept: name, st: s0, inT: ll ? ll.inT : '', outT: ll ? ll.outT : '', called: !!rm[k], phones: canCall ? e.phones : [] });
+    const d = dm[name] || (dm[name] = { dept: name, total: 0, present: 0, dayOff: 0, leave: 0, absent: 0, called: 0, absentList: [] });
+    d.total++;
+    if (present[k]) d.present++;
+    else if (wk[k] && wk[k].indexOf(String(dow)) >= 0) d.dayOff++;
+    else if (lv[k]) d.leave++;
+    else { d.absent++; if (rm[k]) d.called++;
+      if (d.absentList.length < 300) d.absentList.push({ id: e.id, name: e.name, join: e.join, phones: canCall ? e.phones : [], rm: rm[k] || null, ms: safeMs_(k, e, D, pd, wk, lvr) }); }
+  });
+  const rate = x => { const s = x.total - x.dayOff - x.leave; return s > 0 ? Math.round(x.present / s * 1000) / 10 : null; };
+  const depts = Object.keys(dm).map(n => { const x = dm[n]; ['total', 'present', 'dayOff', 'leave', 'absent'].forEach(f => T[f] += x[f]); x.rate = rate(x); return x; });
+  T.rate = rate(T);
+  const ranked = depts.filter(x => x.rate !== null).sort((a, b) => a.rate - b.rate);
+  const lowest = ranked.length ? { dept: ranked[0].dept, rate: ranked[0].rate } : null;
+  const rows = all.slice().reverse().slice(0, 300).map(r => ({ id: r[0], emp: r[2], name: r[3], dept: r[4], from: fmtD_(r[5]), to: fmtD_(r[6]),
+    fi: iso_(r[5]), ti: iso_(r[6]), reason: r[7], emerg: r[8], st: [r[9], r[10], r[11]], final: r[12], remarks: r[13],
+    type: String(r[14] || ''), att: String(r[15] || ''), days: leaveDays_(r[5], r[6]), at: fmtT_(r[1]),
+    direct: r[9] === SKIPPED && r[10] === SKIPPED }));
+  // An approver can act only when every earlier stage is Approved or Skipped (Lead requests skip Floor/Line stage).
+  rows.forEach(r => { const s = idx - 9;
+    r.canAct = idx !== undefined && r.final === 'Pending' && r.st[s] === 'Pending' && r.st.slice(0, s).every(stageDone_); });
+  return { user: u, canApprove: idx !== undefined, canRemark: REMARK_ROLES.some(x => norm_(x) === norm_(u.role)), canSalary: SALARY_ROLES.some(x => norm_(x) === norm_(u.role)), canForce: FORCE_ROLES.some(x => roleKey_(x) === role_(u)),
+    reasons: REASONS, outcomes: OUTCOMES, rows, overview: {
+    date: D, today, isToday, asOf: Utilities.formatDate(now, TZ, 'EEE, dd MMM yyyy, hh:mm a'), totals: T, depts, lowest, people: people.sort((a, b) => a.name.localeCompare(b.name)),
+    period: PER, periodMonth: periodOfDate_(today).month,
+    onShift: Object.keys(shift).length, avgHours: hc ? Math.round(hs / hc * 10) / 10 : 0, dayOffMapped: Object.keys(wk).length,
+    logs: logs.sort((a, b) => b.ts - a.ts).slice(0, 500),
+    trend: days.map(d => ({ d, n: Object.keys(per[d]).length })),
+    pendingOld: all.filter(r => r[12] === 'Pending' && r[1] instanceof Date && now - r[1] > 864e5).length } };
+}
+
+const fmtT_ = d => d instanceof Date ? Utilities.formatDate(d, TZ, 'dd MMM, hh:mm a') : String(d || '');
+
+function saveRemark(token, empId, dateStr, reason, outcome, emergency, text) {
+  const u = user_(token);
+  if (REMARK_ROLES.indexOf(u.role) < 0) throw new Error('You do not have permission to add remarks.');
+  const e = employees_().find(x => norm_(x.id) === norm_(empId));
+  if (!e || !inScope_(u, e.dept, e.team)) throw new Error('This employee is outside your scope.');
+  if (REASONS.indexOf(reason) < 0) throw new Error('Please select an absence reason.');
+  if (OUTCOMES.indexOf(outcome) < 0) throw new Error('Please select the call outcome.');
+  text = String(text || '').trim().slice(0, 300);
+  const today = iso_(new Date()), D = /^\d{4}-\d{2}-\d{2}$/.test(dateStr || '') && dateStr <= today ? dateStr : today;
+  tab_('Absence_Remarks', RM_H).appendRow([D, e.id, e.name, e.dept, reason, outcome, emergency ? 'Yes' : 'No', text, u.name, u.role, new Date()]);
+  return portalData(token, D);
+}
+
+function decide(token, reqId, decision, remark, dateStr) {
+  const u = user_(token), idx = stageIndex_(u);
+  if (idx === undefined) throw new Error('You do not have approval permission.');
+  if (['Approved', 'Rejected'].indexOf(decision) < 0) throw new Error('Invalid');
+  if (decision === 'Rejected' && !(remark || '').trim()) throw new Error('A remark is required to reject a request.');
+  const lock = lock_();
+  try {
+    const sh = tab_('Leave_Requests', LV_H), r = sh.getDataRange().getValues();
+    for (let i = 1; i < r.length; i++) if (r[i][0] === reqId) {
+      if (!inScope_(u, r[i][4])) throw new Error('This request is outside your department scope.');
+      if (r[i][12] !== 'Pending' || r[i][idx] !== 'Pending' || !r[i].slice(9, idx).every(stageDone_))
+        throw new Error('This request is not awaiting your action.');
+      r[i][idx] = decision;
+      r[i][12] = decision === 'Rejected' ? 'Rejected' : (idx === STAGE.Manager ? 'Approved' : 'Pending');
+      const note = remark ? (r[i][13] ? r[i][13] + '\n' : '') + u.role + ' (' + u.name + '): ' + remark : r[i][13];
+      sh.getRange(i + 1, 10, 1, 5).setValues([[r[i][9], r[i][10], r[i][11], r[i][12], note]]);
+      return portalData(token, dateStr);
+    }
+    throw new Error('Request not found.');
+  } finally { lock.releaseLock(); }
+}
+
+// ---------- Salary calculation (HR / Manager) ----------
+// Source 1 (preferred): the Attendance Report. The tab whose name matches the month is used.
+//   Fixed columns (see ATT_MAP): BC Working, AT Public Holiday, AU Holiday (Day off work), AV OT, AS Off day, AR Leave, AQ Absent.
+// Source 2 (fallback): Daily_Log check-ins split into Working / Holiday (Holidays tab) / Day Off Work (weekly off).
+// v9.1: the selected month is a salary period (21st to 20th, see PERIOD settings). The month label picks the
+//       Attendance Report tab; the Daily_Log fallback and the holiday list use the exact period dates.
+// v9.4: the Daily_Log fallback counts each shift on its Working Day.
+function attSummary_(empId, month) {
+  const mn = ['january','february','march','april','may','june','july','august','september','october','november','december'][+month.slice(5, 7) - 1];
+  const y = month.slice(0, 4), mm = month.slice(5, 7), key = norm_(empId);
+  // v9.2: a tab matches only when its name has this month AND (if the name shows a year) the same year,
+  //       so "Oct 25 (Operator)" is never used for October 2026. Names such as "Oct 26 (Operator)" / "Oct 2026" / "2026-10" all match.
+  const yrRx = new RegExp('(^|[^0-9])(' + y + '|' + y.slice(2) + ')([^0-9]|$)');
+  const named = n => { n = norm_(n); return (WK_MON_[+mm - 1].test(n) && (!/\d\d/.test(n) || yrRx.test(n))) || n.indexOf(y + '-' + mm) >= 0 || n.indexOf(mm + '-' + y) >= 0 || n.indexOf(mm + '/' + y) >= 0; };
+  const need = Math.max.apply(null, Object.keys(ATT_MAP).map(k => colIdx_(ATT_MAP[k]))) + 1, found = [];
+  try {
+    const all = SpreadsheetApp.openById(ATT_SS).getSheets(), nm = all.filter(s => named(s.getName()));
+    (nm.length ? nm : all).forEach(sh => {
+      const lr = sh.getLastRow(), lcAll = sh.getLastColumn(); if (lr < 2) return;
+      const top = sh.getRange(1, 1, Math.min(lr, 12), Math.min(lcAll, 60)).getValues();
+      for (let r = 0; r < top.length; r++) {
+        const h = top[r].map(norm_), ic = h.findIndex(x => x === 'id' || x === 'employee id');
+        if (ic < 0) continue;
+        const ids = sh.getRange(r + 2, ic + 1, lr - r - 1, 1).getValues();
+        const at = ids.findIndex(x => norm_(x[0]) === key);
+        if (at < 0) break;
+        const row = sh.getRange(r + 2 + at, 1, 1, Math.min(lcAll, need)).getValues()[0];
+        const num = n => { const k = colIdx_(ATT_MAP[n]), v = k < row.length ? row[k] : '';
+          return v !== '' && v != null && !isNaN(Number(v)) ? Number(v) : null; };
+        found.push({ tab: sh.getName(), named: named(sh.getName()), working: num('working'), pubHoliday: num('pubHoliday'),
+          holiday: num('holiday'), ot: num('ot'), offDay: num('offDay'), leave: num('leave'), absent: num('absent') });
+        break;
+      }
+    });
+  } catch (e) { Logger.log('attSummary_: ' + e.message); }
+  return found.find(x => x.named) || (found.length === 1 ? found[0] : null);
+}
+
+function salaryData(token, empId, month) {
+  const u = user_(token);
+  if (!SALARY_ROLES.some(x => norm_(x) === norm_(u.role))) throw new Error('You do not have permission to use salary calculation.');
+  if (!/^\d{4}-\d{2}$/.test(month || '')) throw new Error('Please select a month.');
+  const e = employees_().find(x => norm_(x.id) === norm_(empId));
+  if (!e) throw new Error('Employee ID not found.');
+  if (!inScope_(u, e.dept)) throw new Error('This employee is outside your department scope.');
+  const PR = periodOfMonth_(month), monthDays = PR.days;
+  const first = PR.start, last = PR.end;
+  const att = attSummary_(e.id, month), pick = (a, b) => a != null ? a : b;
+
+  // Daily_Log is read only when the Attendance Report is missing or incomplete (keeps the lookup fast).
+  const needLog = !att || att.working == null || att.pubHoliday == null || att.holiday == null;
+  let c = { working: 0, holiday: 0, dayOff: 0 }, nSeen = null, hol = {}, wk = '';
+  if (needLog) {
+    hol = holidays_(); wk = weekendMap_(month)[norm_(e.id)] || '';
+    const CFG = deptCfg_();
+    const lg = tab_('Daily_Log', LOG_H), lr = lg.getLastRow();
+    const rows = lr >= 2 ? lg.getRange(2, 1, lr - 1, LOG_H.length).getValues() : [], seen = {};
+    rows.forEach(r => {
+      if (norm_(r[1]) !== norm_(e.id)) return;
+      const d = wdOfRow_(r, CFG); if (d < first || d > last || seen[d]) return; seen[d] = 1;   // v9.4: Working Day
+      if (hol[d]) c.holiday++;
+      else if (wk && wk.indexOf(String(dowOf_(d))) >= 0) c.dayOff++;
+      else c.working++;
+    });
+    nSeen = Object.keys(seen).length;
+  }
+  const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  return { emp: { id: e.id, name: e.name, dept: e.dept, join: e.join }, month, monthDays, from: first, to: last, present: nSeen,
+    working: att ? pick(att.working, c.working) : c.working,       // BC  Working day
+    holiday: att ? pick(att.pubHoliday, c.holiday) : c.holiday,    // AT  Public Holiday
+    dayOff: att ? pick(att.holiday, c.dayOff) : c.dayOff,          // AU  Holiday (Day off work)
+    ot: att ? pick(att.ot, 0) : 0,                                 // AV  OT
+    offDay: att ? att.offDay : null,                               // AS  Off day (info)
+    leave: att ? att.leave : null,                                 // AR  Leave (info)
+    absent: att ? att.absent : null,                               // AQ  Absent (info, v9.3)
+    source: att ? 'Attendance Report, tab "' + att.tab + '"' + (att.named ? '' : ' (tab name does not show the month, please verify)') : 'Daily_Log check-ins (no matching row found in the Attendance Report)',
+    offDays: wk ? wk.split('').map(i => names[+i]).join(', ') : '',
+    holidayList: Object.keys(hol).filter(d => d >= first && d <= last).sort().map(d => ({ d, n: hol[d] })) };
+}
+
+// Run from the editor to see what the Attendance Report looks like to the script (check View > Logs).
+function diagSalary() {
+  Logger.log('ATT_MAP: ' + JSON.stringify(ATT_MAP));
+  SpreadsheetApp.openById(ATT_SS).getSheets().forEach(sh => {
+    const lr = sh.getLastRow(), lc = Math.min(sh.getLastColumn(), 60); if (lr < 1) return;
+    Logger.log('TAB "' + sh.getName() + '" rows=' + lr);
+    sh.getRange(1, 1, Math.min(lr, 4), lc).getValues().forEach((r, i) => Logger.log('  row ' + (i + 1) + ': ' + JSON.stringify(r)));
+  });
+}
+
+
+// ======================= v9 : MANAGEMENT FORCE CHECK-OUT =======================
+// Only the check-out columns of an OPEN Daily_Log row are written. Date, Check In, location and every other
+// existing value stay untouched. The row is marked "Management Force Check-out" and a full audit row is stored
+// in the Force_Checkout_Log sheet.
+function forceUser_(token) {
+  const u = user_(token);
+  if (!FORCE_ROLES.some(x => roleKey_(x) === role_(u))) throw new Error('You do not have permission to force check-out.');
+  return u;
+}
+// All open (checked-in, not checked-out) rows of one employee.
+function findOpenRows_(sh, empId) {
+  const lr = sh.getLastRow(), out = [];
+  if (lr < 2) return out;
+  const start = Math.max(2, lr - 19999), rows = sh.getRange(start, 1, lr - start + 1, 7).getValues(), key = norm_(empId);
+  rows.forEach((r, i) => { if (norm_(r[1]) === key && r[5] && !r[6]) out.push({ row: start + i, checkIn: new Date(r[5]).getTime(), date: iso_(r[0]) }); });
+  return out;
+}
+function forceHistory_(u) {
+  const t = tail_(tab_('Force_Checkout_Log', FC_H), 1000, FC_H.length);
+  return t.v.filter(r => r[0] && inScope_(u, r[7])).reverse().slice(0, 100).map(r => ({
+    id: r[0], at: fmtT_(r[1]), day: iso_(r[1]), by: String(r[2] || ''), role: String(r[4] || ''), empId: String(r[5] || ''), name: String(r[6] || ''),
+    dept: String(r[7] || ''), date: iso_(r[8]), inT: fmtT_(r[9]), outT: fmtT_(r[10]), hrs: typeof r[11] === 'number' ? r[11] : null,
+    reason: String(r[12] || ''), remarks: String(r[13] || '') }));
+}
+// Active sessions (+ optional employee search) for the Force Check-out screen.
+// v9.4: an overnight shift that started on the previous calendar date is NOT "open too long" until its own shift date has passed.
+function forceData(token, query) {
+  const u = forceUser_(token), now = Date.now(), today = iso_(new Date()), CFG = deptCfg_();
+  const emps = employees_().filter(e => e.active && inScope_(u, e.dept, e.team)), byId = {};
+  emps.forEach(e => byId[norm_(e.id)] = e);
+  const lg = tab_('Daily_Log', LOG_H), lr = lg.getLastRow(), st = Math.max(2, lr - 19999);
+  const rows = lr >= 2 ? lg.getRange(st, 1, lr - st + 1, LOG_H.length).getValues() : [];
+  const latest = {}, active = [];
+  rows.forEach(r => {
+    const k = norm_(r[1]), e = byId[k]; if (!e || !r[5]) return;
+    latest[k] = r;
+    if (!r[6]) {
+      const inMs = new Date(r[5]).getTime(), hrs = Math.round((now - inMs) / 36e5 * 10) / 10, d = iso_(r[0]), shiftToday = shiftDateAt_(now, CFG[norm_(e.dept || '')] || null);
+      active.push({ id: e.id, name: e.name, dept: e.dept || 'Unassigned', email: e.email || '', date: d, inT: fmtT_(r[5]), inMs, hrs,
+        stale: d < shiftToday || hrs > FORCE_STALE_HOURS, inLoc: String(r[12] || (r[8] !== '' ? r[8] + ', ' + r[9] : '')) });
+    }
+  });
+  active.sort((a, b) => a.inMs - b.inMs);
+  const q = norm_(query || ''), results = q.length >= 2 ? emps.filter(e => norm_(e.id).indexOf(q) >= 0 || norm_(e.name).indexOf(q) >= 0 || norm_(e.email || '').indexOf(q) >= 0)
+    .slice(0, 30).map(e => {
+      const k = norm_(e.id), r = latest[k], sess = active.filter(a => norm_(a.id) === k);
+      return { id: e.id, name: e.name, dept: e.dept || 'Unassigned', email: e.email || '', state: sess.length ? 'active' : (r ? 'out' : 'none'), sessions: sess,
+        date: r ? iso_(r[0]) : '', inT: r ? fmtT_(r[5]) : '', outT: r && r[6] ? fmtT_(r[6]) : '', forced: !!(r && r[14] === FORCE_METHOD) };
+    }) : null;
+  const history = forceHistory_(u);
+  return { reasons: FORCE_REASONS, staleHours: FORCE_STALE_HOURS, active: active.slice(0, 500), results, history,
+    counts: { active: active.length, stale: active.filter(a => a.stale).length, forcedToday: history.filter(h => h.day === today).length } };
+}
+
+// Closes ONE open session. inMs identifies the exact session (so a stale screen can never close the wrong row).
+function forceCheckout(token, empId, inMs, reason, remarks, outStr, query) {
+  const u = forceUser_(token);
+  const e = employees_().find(x => norm_(x.id) === norm_(empId));
+  if (!e) throw new Error('Employee not found.');
+  if (!inScope_(u, e.dept, e.team)) throw new Error('This employee is outside your scope.');
+  reason = String(reason || '').trim();
+  if (FORCE_REASONS.indexOf(reason) < 0) throw new Error('Please select a reason.');
+  remarks = String(remarks || '').trim().slice(0, 300);
+  if (remarks.length < 3) throw new Error('Please write a remark explaining why this session is being closed.');
+  inMs = Number(inMs); if (!isFinite(inMs) || inMs <= 0) throw new Error('Invalid attendance session.');
+  const nowMs = Date.now(); let outMs = nowMs;
+  if (outStr) {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(outStr))) throw new Error('Please enter a valid check-out time.');
+    outMs = Date.parse(outStr + ':00+06:00');
+    if (isNaN(outMs)) throw new Error('Please enter a valid check-out time.');
+  }
+  if (outMs > nowMs + 60000) throw new Error('The check-out time cannot be in the future.');
+  if (outMs <= inMs) throw new Error('The check-out time must be after the check-in time.');
+
+  const cfg = cfgOf_(e.dept);
+  const lock = lock_(); let done = null, remaining = 0;
+  try {
+    const sh = tab_('Daily_Log', LOG_H), open = findOpenRows_(sh, e.id).find(o => Math.abs(o.checkIn - inMs) < 1000);
+    if (open) {
+      const hrs = Math.round((outMs - open.checkIn) / 36000) / 100;
+      sh.getRange(open.row, 7, 1, 2).setValues([[new Date(outMs), hrs]]);                       // Check Out + Hours (Check In untouched)
+      sh.getRange(open.row, 15, 1, 3).setValues([[FORCE_METHOD, u.name + ' (' + u.role + ')', reason + ': ' + remarks]]);
+      sh.getRange(open.row, 18).setValue(workingDayFor_(open.date, outMs, cfg));                // v9.4: Working Day
+      SpreadsheetApp.flush();
+      const chk = sh.getRange(open.row, 1, 1, 8).getValues()[0];                                // read back: session really closed?
+      if (!chk[6] || new Date(chk[5]).getTime() !== open.checkIn || String(chk[1]).trim() !== e.id) throw new Error('Force check-out could not be saved. Please try again.');
+      const now = new Date(), id = 'FC-' + Utilities.formatDate(now, TZ, 'yyMMdd-HHmmss') + '-' + Utilities.getUuid().slice(0, 4).toUpperCase();
+      const fc = tab_('Force_Checkout_Log', FC_H), fr = fc.getLastRow() + 1;
+      fc.getRange(fr, 1, 1, FC_H.length).setValues([[id, now, u.name, u.email, u.role, e.id, e.name, e.dept, open.date, new Date(open.checkIn), new Date(outMs), hrs, reason, remarks]]);
+      SpreadsheetApp.flush();
+      if (String(fc.getRange(fr, 1).getValue()) !== id) throw new Error('The audit record could not be saved. Please check the attendance record and try again.');
+      remaining = findOpenRows_(sh, e.id).length;
+      done = { id, hrs };
+    }
+  } finally { lock.releaseLock(); }
+  const data = forceData(token, query);
+  if (!done) return { ok: false, message: 'This session is already closed (the employee or another manager may have closed it). The list has been refreshed.', data };
+  return { ok: true, data, message: 'Force check-out completed for ' + e.name + ' (' + done.hrs + ' h recorded). ' +
+    (remaining ? remaining + ' more open session(s) remain for this employee, please close them too.' : 'The employee can now check in again under the normal attendance rules.') };
+}
+
+
+// ======================= v9.4 : AUTOMATIC CHECK-OUT (server-side, time-driven trigger) =======================
+// Runs from a Google Apps Script time-driven trigger, so it works even when no page is open.
+// For every OPEN Daily_Log row (checked in, not checked out):
+//   1. the department is taken from the row and looked up in Users!Q:T (no row / no valid Auto Check out -> skipped, logged once)
+//   2. the scheduled auto check-out moment = the FIRST occurrence of the Users!T clock time strictly AFTER that employee's check-in
+//      (AM/PM and the next calendar day are handled by full timestamps, e.g. in 11-Oct 10:00 PM -> out 12-Oct 7:00 AM)
+//   3. it is processed only when that moment has passed, and not older than AUTO_MAX_AGE_HOURS (older shifts are left for Management Force Check-out)
+//   4. the minimum working duration is verified: (scheduled moment - check-in) must be >= the department minimum (Users!S duration, default 5 h).
+//      If not, NOTHING is written (no premature check-out); a CONFLICT line is logged and the employee / management can still close it normally.
+//   5. the check-out time recorded is the SCHEDULED moment (not the time the scheduler happened to run), so a late run stores the correct time.
+// The scheduler takes the same script lock as check-in / check-out, re-checks that the Check Out cell is still empty, and only fills EMPTY cells,
+// so a manual check-out is never overwritten and running it many times can never create a duplicate or change a closed record.
+function autoCheckoutRun() { return autoCheckoutCore_(false); }
+// Safe preview: logs what WOULD be closed, writes nothing.
+function autoCheckoutDryRun() { return autoCheckoutCore_(true); }
+
+function acOnce_(key) { if (CACHE.get(key)) return false; CACHE.put(key, '1', 21600); return true; }
+function autoCheckoutCore_(dry) {
+  const nowMs = Date.now(), runId = 'AC-' + Utilities.formatDate(new Date(nowMs), TZ, 'yyMMdd-HHmm') + (dry ? '-DRY' : '');
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(25000)) { Logger.log(runId + ': skipped, the system was busy (lock not available). It will run again at the next trigger.'); return { runId, closed: 0, busy: true }; }
+  const ev = [], stat = { scanned: 0, closed: 0, skipped: 0, errors: 0 };
+  const add = (event, r, sd, inMs, autoMs, hrs, detail) => ev.push([new Date(nowMs), runId, event, String(r[1] || '').trim(), String(r[2] || ''), String(r[4] || ''), sd || '',
+    inMs ? new Date(inMs) : '', autoMs ? new Date(autoMs) : '', hrs == null ? '' : hrs, detail || '']);
+  let sh = null;
+  try {
+    const CFG = deptCfg_(); sh = tab_('Daily_Log', LOG_H);
+    const lr = sh.getLastRow();
+    if (lr >= 2) {
+      const start = Math.max(2, lr - 19999), rows = sh.getRange(start, 1, lr - start + 1, 7).getValues();
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i]; if (!r[5] || r[6]) continue;                       // only valid check-in without a check-out
+        const empId = String(r[1] || '').trim(); if (!empId) continue;
+        stat.scanned++;
+        try {
+          const inMs = new Date(r[5]).getTime(); if (isNaN(inMs)) continue;
+          const dept = String(r[4] || '').trim(), c = CFG[norm_(dept)], sd = iso_(r[0]), row = start + i;
+          if (!c || c.auto < 0) { stat.skipped++; if (acOnce_('acnc:' + norm_(dept))) add('SKIPPED_NO_CONFIG', r, sd, inMs, null, null, 'Department "' + dept + '" has no valid Auto Check out (Users!T) - nothing was changed.'); continue; }
+          const autoMs = nextClockAfter_(inMs, c.auto);
+          if (autoMs > nowMs) continue;                                         // not due yet
+          if (nowMs - autoMs > AUTO_MAX_AGE_HOURS * 36e5) { stat.skipped++; if (acOnce_('acold:' + empId + '|' + inMs)) add('SKIPPED_TOO_OLD', r, sd, inMs, autoMs, null, 'Auto check-out time passed more than ' + AUTO_MAX_AGE_HOURS + ' h ago - left for Management Force Check-out.'); continue; }
+          const minMs = minMsFor_(dept, CFG);
+          if (autoMs - inMs < minMs) { stat.skipped++; if (acOnce_('acmin:' + empId + '|' + inMs)) add('CONFLICT_MIN_DURATION', r, sd, inMs, autoMs, Math.round((autoMs - inMs) / 36000) / 100,
+            'Auto check-out time would give only ' + Math.round((autoMs - inMs) / 36e3) / 100 + ' h, below the minimum ' + (minMs / 36e5) + ' h. No check-out was created. The employee can check out manually after the minimum time, or management can force check-out.'); continue; }
+          const hrs = Math.round((autoMs - inMs) / 36000) / 100, wd = workingDayFor_(sd, autoMs, c);
+          if (dry) { stat.closed++; add('WOULD_CLOSE', r, sd, inMs, autoMs, hrs, 'Dry run: Working Day ' + wd); continue; }
+          if (sh.getRange(row, 7).getValue() !== '' || String(sh.getRange(row, 2).getValue()).trim() !== empId) continue;   // re-check right before writing
+          sh.getRange(row, 7, 1, 2).setValues([[new Date(autoMs), hrs]]);                                      // Check Out + Hours (Check In untouched)
+          sh.getRange(row, 15, 1, 3).setValues([[AUTO_CHECKOUT_METHOD, AUTO_CHECKOUT_BY, 'Auto check-out at ' + c.raw.t + ' (Users!T), min duration ' + (minMs / 36e5) + ' h met. ' + runId]]);
+          sh.getRange(row, 18).setValue(wd);                                                                    // Working Day
+          SpreadsheetApp.flush();
+          if (!sh.getRange(row, 7).getValue()) throw new Error('Auto check-out could not be saved.');
+          stat.closed++; add('CLOSED', r, sd, inMs, autoMs, hrs, 'Working Day ' + wd);
+        } catch (e1) { stat.errors++; add('ERROR', r, iso_(r[0]), null, null, null, String(e1.message || e1)); }
+      }
+    }
+  } catch (e) { stat.errors++; ev.push([new Date(nowMs), runId, 'ERROR', '', '', '', '', '', '', '', 'Run failed: ' + String(e.message || e)]); Logger.log(runId + ' failed: ' + (e.stack || e)); }
+  finally {
+    try {
+      if (ev.length && !dry) {   // a summary row is written only when something happened, so the log does not grow on idle runs
+        ev.push([new Date(nowMs), runId, 'RUN', '', '', '', '', '', '', '', 'scanned open shifts ' + stat.scanned + ' | closed ' + stat.closed + ' | skipped ' + stat.skipped + ' | errors ' + stat.errors]);
+        const lg = tab_('AutoCheckout_Log', AC_H); lg.getRange(lg.getLastRow() + 1, 1, ev.length, AC_H.length).setValues(ev);
+      }
+    } catch (e2) { Logger.log('AutoCheckout_Log: ' + e2.message); }
+    lock.releaseLock();
+  }
+  Logger.log(runId + ': scanned ' + stat.scanned + ', ' + (dry ? 'would close ' : 'closed ') + stat.closed + ', skipped ' + stat.skipped + ', errors ' + stat.errors);
+  if (dry) ev.forEach(x => Logger.log('  ' + x[2] + ' | ' + x[3] + ' ' + x[4] + ' | ' + x[5] + ' | in ' + (x[7] ? fmtT_(x[7]) : '') + ' | auto ' + (x[8] ? fmtT_(x[8]) : '') + ' | ' + x[9] + ' h | ' + x[10]));
+  return { runId, closed: stat.closed, skipped: stat.skipped, errors: stat.errors, scanned: stat.scanned };
+}
+
+// Run ONCE from the editor (and authorize). Running it again is safe: it never creates a second trigger.
+// Only triggers whose handler is autoCheckoutRun are looked at; every other trigger of the project is left alone.
+function setupAutoCheckoutTrigger() {
+  const H = 'autoCheckoutRun';
+  const mine = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === H);
+  if (mine.length) {
+    mine.slice(1).forEach(t => ScriptApp.deleteTrigger(t));   // removes only accidental duplicates of this same function
+    Logger.log('Auto check-out trigger already exists (' + mine.length + ' found' + (mine.length > 1 ? ', ' + (mine.length - 1) + ' duplicate(s) removed' : '') + '). Nothing else changed.');
+    return;
+  }
+  ScriptApp.newTrigger(H).timeBased().everyMinutes(AUTO_TRIGGER_MINUTES).create();
+  tab_('AutoCheckout_Log', AC_H);
+  Logger.log('Auto check-out trigger created: ' + H + ' every ' + AUTO_TRIGGER_MINUTES + ' minutes.');
+}
+// Optional: removes ONLY the auto check-out trigger.
+function removeAutoCheckoutTrigger() {
+  const t = ScriptApp.getProjectTriggers().filter(x => x.getHandlerFunction() === 'autoCheckoutRun');
+  t.forEach(x => ScriptApp.deleteTrigger(x));
+  Logger.log('Auto check-out trigger(s) removed: ' + t.length);
+}
