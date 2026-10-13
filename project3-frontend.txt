@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Central Sort Ops Resource Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--navy:#0b1220;--navy2:#111c33;--blue:#2563eb;--bg:#f3f6fb;--card:#fff;--bd:#e5e9f0;--tx:#0f172a;--mu:#64748b;--gr:#16a34a;--am:#d97706;--rd:#dc2626;--sh:0 1px 2px rgba(15,23,42,.04),0 8px 24px rgba(15,23,42,.06);--r:14px}
+*{box-sizing:border-box}body{margin:0;font-family:Inter,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--tx);font-size:14px}
+button,input,select,textarea{font:inherit}button{cursor:pointer}.hidden{display:none!important}
+label{display:block;font-size:12px;font-weight:600;color:#475569;margin-bottom:6px}
+input,select{width:100%;border:1px solid #d6dde8;border-radius:10px;padding:10px 12px;background:#fff;outline:none;transition:.15s}
+input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(37,99,235,.12)}input[readonly]{background:#f1f5f9}
+.btn{border:0;border-radius:10px;padding:10px 16px;font-weight:600;font-size:13px;transition:.15s}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn-p{background:var(--blue);color:#fff}.btn-p:hover{background:#1d4ed8}.btn-l{background:#eef2f7;color:#334155}.btn-l:hover{background:#e2e8f0}
+.btn-s{padding:6px 12px;font-size:12px}
+/* login */
+#login{min-height:100vh;display:grid;grid-template-columns:1.1fr 1fr}
+.l-hero{background:linear-gradient(135deg,#0b1220,#1e3a8a);color:#fff;padding:60px;display:flex;flex-direction:column;justify-content:center}
+.l-hero h1{font-size:34px;margin:0 0 12px;line-height:1.2}.l-hero p{color:#bfdbfe;max-width:420px;line-height:1.6}
+.l-hero ul{list-style:none;padding:0;margin:26px 0 0;color:#dbeafe}.l-hero li{margin:10px 0}.l-hero li:before{content:"✓ ";color:#60a5fa;font-weight:700}
+.l-form{display:grid;place-items:center;padding:30px}.l-card{width:min(400px,100%)}
+.logo{width:46px;height:46px;border-radius:13px;background:var(--blue);color:#fff;display:grid;place-items:center;font-weight:800;margin-bottom:18px}
+.l-card h2{margin:0 0 6px;font-size:24px}.l-card p{margin:0 0 22px;color:var(--mu)}
+.err{margin-top:14px;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap}
+/* app */
+#app{display:flex;min-height:100vh}
+.side{width:248px;background:var(--navy);color:#fff;position:fixed;inset:0 auto 0 0;overflow:auto;z-index:50;transition:.2s}
+.sb{padding:20px;border-bottom:1px solid rgba(255,255,255,.07);display:flex;gap:12px;align-items:center}
+.sb .logo{margin:0;width:38px;height:38px;font-size:14px}.sb b{display:block}.sb small{color:#94a3b8;font-size:11px}
+.nav{padding:10px}.ns{padding:14px 12px 6px;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#64748b}
+.nav button{width:100%;display:flex;gap:10px;align-items:center;border:0;background:none;color:#cbd5e1;padding:10px 12px;border-radius:9px;text-align:left;font-size:13px;font-weight:500;margin-bottom:2px}
+.nav button:hover{background:var(--navy2);color:#fff}.nav button.active{background:var(--blue);color:#fff}.nav i{font-style:normal;width:18px;text-align:center}
+.main{margin-left:248px;width:calc(100% - 248px)}
+.top{height:64px;background:#fff;border-bottom:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between;padding:0 24px;position:sticky;top:0;z-index:30}
+.top h1{font-size:17px;margin:0}.tr{display:flex;gap:12px;align-items:center}
+.pill{display:flex;gap:8px;align-items:center;background:#f1f5f9;border-radius:999px;padding:5px 12px 5px 5px;font-size:12px;font-weight:600}
+.av{width:26px;height:26px;border-radius:50%;background:var(--blue);color:#fff;display:grid;place-items:center;font-size:11px}
+.menu{display:none;border:0;background:#eef2f7;width:36px;height:36px;border-radius:9px;margin-right:10px}
+.content{padding:24px;max-width:1500px}.page{display:none}.page.active{display:block}
+.ph{margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;gap:12px}.ph h2{margin:0;font-size:21px}.ph p{margin:4px 0 0;color:var(--mu);font-size:13px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:var(--r);box-shadow:var(--sh);padding:18px;margin-bottom:16px}
+.ct{font-weight:700;margin-bottom:14px;font-size:14px}
+.grid{display:grid;gap:14px}.g2{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
+.kpi{background:#fff;border:1px solid var(--bd);border-radius:var(--r);padding:16px;box-shadow:var(--sh);position:relative;overflow:hidden}
+.kpi:before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--c,var(--blue))}
+.kl{color:var(--mu);font-size:12px;font-weight:600}.kv{font-size:26px;font-weight:800;margin-top:6px}.ks{color:var(--mu);font-size:11px;margin-top:4px}
+.tb{display:flex;gap:12px;flex-wrap:wrap;align-items:end}.tb .f{flex:1;min-width:150px}
+.tw{overflow:auto;max-height:70vh}table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{position:sticky;top:0;background:#f8fafc;color:#475569;text-align:left;padding:10px;font-size:11px;text-transform:uppercase;letter-spacing:.03em;border-bottom:1px solid var(--bd);white-space:nowrap}
+td{padding:10px;border-bottom:1px solid #eef2f7}tr:hover td{background:#f8fbff}
+.bd{display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700}
+.b-g{background:#dcfce7;color:#166534}.b-r{background:#fee2e2;color:#991b1b}.b-a{background:#fef3c7;color:#92400e}.b-b{background:#dbeafe;color:#1d4ed8}
+.empty{text-align:center;color:var(--mu);padding:34px}.mu{color:var(--mu)}
+.cb{position:relative;height:280px}
+.lk{display:inline-block;padding:3px 8px;background:#eff6ff;color:#1d4ed8;border-radius:6px;font-size:11px;font-weight:600;text-decoration:none;margin-right:4px}
+.pg{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.pi{background:#f8fafc;border-radius:10px;padding:10px 12px}
+.pi small{display:block;color:var(--mu);font-size:11px;margin-bottom:3px}.pi b{font-size:13px;word-break:break-word}
+.rl{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #eef2f7}
+.hero{display:flex;gap:16px;align-items:center;margin-bottom:6px}.hav{width:56px;height:56px;border-radius:16px;background:var(--blue);color:#fff;display:grid;place-items:center;font-size:20px;font-weight:700}
+/* modal / toast / loader */
+.modal{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:150;display:none;align-items:center;justify-content:center;padding:20px}.modal.show{display:flex}
+.mb{width:min(720px,100%);max-height:90vh;overflow:auto;background:#fff;border-radius:18px;padding:22px;box-shadow:0 24px 70px rgba(15,23,42,.3)}
+.mh{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.mh h3{margin:0}.x{border:0;background:#f1f5f9;width:32px;height:32px;border-radius:8px;font-size:18px}
+#loading{position:fixed;inset:0;background:rgba(255,255,255,.65);backdrop-filter:blur(2px);z-index:300;display:grid;place-items:center}
+.spin{display:flex;gap:12px;align-items:center;background:#fff;padding:14px 20px;border-radius:12px;box-shadow:var(--sh);font-weight:600;font-size:13px}
+.spin:before{content:"";width:18px;height:18px;border:3px solid #dbeafe;border-top-color:var(--blue);border-radius:50%;animation:s .7s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
+#toast{position:fixed;right:20px;bottom:20px;z-index:400;display:flex;flex-direction:column;gap:8px}
+.t{background:#0f172a;color:#fff;padding:12px 16px;border-radius:10px;font-size:13px;box-shadow:var(--sh);max-width:360px;white-space:pre-wrap}.t.e{background:#b91c1c}.t.ok{background:#15803d}
+@media(max-width:1100px){.g4,.g3{grid-template-columns:repeat(2,1fr)}.pg{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:800px){#login{grid-template-columns:1fr}.l-hero{display:none}.side{transform:translateX(-100%)}.side.open{transform:none}
+.main{margin-left:0;width:100%}.menu{display:block}.g2,.g3,.g4,.pg{grid-template-columns:1fr}.content{padding:14px}.pill span{display:none}.top{padding:0 14px}}
+
+.hero-card{background:linear-gradient(120deg,#0b1220 0%,#1e3a8a 60%,#2563eb 100%);color:#fff;border-radius:18px;padding:22px 26px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;box-shadow:var(--sh)}
+.hero-card .hs{font-size:12px;color:#bfdbfe;font-weight:600}.hero-card h2{margin:4px 0;font-size:24px}.hero-card p{margin:0;color:#dbeafe;font-size:13px}
+.chips{display:flex;gap:8px;flex-wrap:wrap}.chip{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.2);padding:7px 12px;border-radius:999px;font-size:12px;font-weight:600}
+.chip.r{background:rgba(220,38,38,.35)}.chip.a{background:rgba(217,119,6,.4)}.chip.g{background:rgba(22,163,74,.4)}
+.fbar{display:flex;gap:12px;flex-wrap:wrap;align-items:end;padding:14px 18px}.fbar .f{flex:1;min-width:130px}
+.ki{position:absolute;right:14px;top:14px;width:38px;height:38px;border-radius:12px;background:#f1f5f9;display:grid;place-items:center;font-size:18px}
+.exp{display:flex;justify-content:flex-end;margin-bottom:8px}
+.sp{height:4px}
+[data-theme=dark]{--bg:#0a1020;--card:#111a2e;--bd:#1f2b45;--tx:#e5eaf5;--mu:#94a3b8}
+[data-theme=dark] .top,[data-theme=dark] .kpi,[data-theme=dark] .mb,[data-theme=dark] input,[data-theme=dark] select{background:#111a2e;color:var(--tx);border-color:var(--bd)}
+[data-theme=dark] th{background:#0f1830;color:#94a3b8;border-color:var(--bd)}[data-theme=dark] td{border-color:#1b2742}[data-theme=dark] tr:hover td{background:#14203a}
+[data-theme=dark] .pi,[data-theme=dark] .pill,[data-theme=dark] .ki{background:#0f1830}[data-theme=dark] .btn-l,[data-theme=dark] .x,[data-theme=dark] .menu{background:#1b2742;color:#cbd5e1}
+[data-theme=dark] label{color:#94a3b8}[data-theme=dark] input[readonly]{background:#0d162b}[data-theme=dark] .rl{border-color:#1b2742}[data-theme=dark] .lk{background:#1e2f55;color:#93c5fd}
+[data-theme=dark] .spin{background:#111a2e;color:#fff}[data-theme=dark] #loading{background:rgba(10,16,32,.7)}
+
+.cal{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}.cal .dh{font-size:11px;font-weight:700;color:var(--mu);text-align:center;padding:4px}
+.cd{border:1px solid var(--bd);border-radius:10px;padding:6px 8px;min-height:62px;background:#fff}.cd small{display:block;color:var(--mu);font-size:10px}
+.cd b{display:inline-block;margin-top:4px;font-size:12px;padding:2px 7px;border-radius:6px}.cd.e0{visibility:hidden}.cd.today{border-color:var(--blue);box-shadow:0 0 0 2px rgba(37,99,235,.18)}
+.cd.P b{background:#dcfce7;color:#166534}.cd.A b{background:#fee2e2;color:#991b1b}.cd.L b{background:#fef3c7;color:#92400e}
+.cd.OFF b{background:#e2e8f0;color:#475569}.cd.H b{background:#ede9fe;color:#5b21b6}.cd.X b{background:#cffafe;color:#155e75}.cd.N b{background:#f1f5f9;color:#94a3b8}
+.sumchips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}.sc{background:#f1f5f9;border-radius:10px;padding:8px 14px;font-size:11px;color:var(--mu)}.sc b{display:block;font-size:17px;color:var(--tx)}
+.legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;font-size:11px;color:var(--mu)}
+[data-theme=dark] .cd,[data-theme=dark] .sc{background:#0f1830}
+@media(max-width:800px){.cd{min-height:50px;padding:4px}.cd b{font-size:10px;padding:1px 4px}}
+.note{margin-top:14px;background:#f0fdf4;border:1px solid #bbf7d0;color:#166534;padding:10px 12px;border-radius:10px;font-size:13px}
+.l-foot{margin-top:44px;font-size:12px;color:#93c5fd}
+.l-sec{margin-top:24px;font-size:12px;color:var(--mu);text-align:center}
+.l-card .otp{letter-spacing:10px;font-size:24px;text-align:center;font-weight:700}
+.l-card .hint{font-size:12px;color:var(--mu);margin-top:8px}
+</style>
+</head>
+<body>
+
+<section id="login">
+  <div class="l-hero">
+    <h1>Central Sort Ops<br>Resource Tracker</h1>
+    <p>Workforce, capacity, turnover and manpower forecasting, all in one secure workspace.</p>
+    <ul><li>Live workforce dashboard</li><li>Team-wise capacity planning</li><li>Role-based access with email verification</li></ul>
+    <div class="l-foot">Authorized personnel only. All sign-in activity is logged.</div>
+  </div>
+  <div class="l-form"><div class="l-card">
+    <div class="logo">CB</div><h2 id="loginTitle">Sign in</h2>
+    <p id="loginSub">Enter your official email address. We will send you a one-time verification code.</p>
+
+    <div id="stEmail">
+      <label for="loginEmail">Official Email</label>
+      <input id="loginEmail" type="email" autocomplete="email" placeholder="user@example.com" onkeydown="if(event.key==='Enter')sendCode()">
+      <button class="btn btn-p" style="width:100%;margin-top:16px;padding:12px" onclick="sendCode()">Send Verification Code</button>
+    </div>
+
+    <div id="stCode" class="hidden">
+      <label for="loginCode">Verification Code</label>
+      <input id="loginCode" class="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••" onkeydown="if(event.key==='Enter')verifyCode()">
+      <div class="hint">The code is valid for 10 minutes. Please check your Spam folder if you do not see it.</div>
+      <button class="btn btn-p" style="width:100%;margin-top:16px;padding:12px" onclick="verifyCode()">Verify &amp; Sign In</button>
+      <div style="display:flex;justify-content:space-between;gap:8px;margin-top:12px">
+        <button class="btn btn-l btn-s" onclick="backToEmail()">← Change email</button>
+        <button class="btn btn-l btn-s" id="resendBtn" onclick="sendCode(true)">Resend code</button>
+      </div>
+    </div>
+
+    <div id="loginError" class="err hidden"></div>
+    <div id="loginNote" class="note hidden"></div>
+    <div class="l-sec">🔒 Secured with one-time email verification</div>
+  </div></div>
+</section>
+
+<section id="app" class="hidden">
+  <aside id="side" class="side">
+    <div class="sb"><div class="logo">CB</div><div><b>Central Sort Ops</b><small>Resource Tracker</small></div></div>
+    <div class="nav" id="nav"></div>
+  </aside>
+  <main class="main">
+    <header class="top">
+      <div style="display:flex;align-items:center"><button class="menu" onclick="$('side').classList.toggle('open')">☰</button><h1 id="title">Dashboard</h1></div>
+      <div class="tr"><button class="btn btn-l btn-s" id="thBtn" onclick="toggleTheme()">🌙</button><div class="pill"><div class="av" id="av"></div><span id="uname"></span></div><button class="btn btn-l btn-s" onclick="logout()">Logout</button></div>
+    </header>
+    <div class="content">
+
+      <section id="page-dashboard" class="page">
+        <div class="hero-card"><div><div class="hs" id="hGreet"></div><h2>Workforce Dashboard</h2><p id="hSub"></p></div><div class="chips" id="hChips"></div></div>
+        <div class="card fbar">
+          <div class="f"><label>Year</label><select id="dYear" onchange="refreshDash()"></select></div>
+          <div class="f"><label>Month</label><select id="dMonth" onchange="refreshDash()"></select></div>
+          <div class="f"><label>Department</label><select id="dDept" onchange="refreshDash()"></select></div>
+          <div class="f"><label>Team</label><select id="dTeam" onchange="refreshDash()"></select></div>
+          <div class="f"><label>Office</label><select id="dOffice" onchange="refreshDash()"></select></div>
+          <button class="btn btn-l" onclick="resetDash()">Reset</button><button class="btn btn-p" onclick="refreshDash()">Refresh</button><button class="btn btn-l" onclick="exportFull('d')">⬇ Full Employee Data</button>
+        </div>
+        <div id="kpis" class="grid g4" style="margin-bottom:16px"></div>
+        <div class="grid g2"><div class="card"><div class="ct">Designation Mix</div><div class="cb"><canvas id="chDes"></canvas></div></div>
+          <div class="card"><div class="ct">Joining vs Deactivation</div><div class="cb"><canvas id="chJoin"></canvas></div></div></div>
+        <div class="grid g2"><div class="card"><div class="ct">Active Headcount by Department</div><div class="cb"><canvas id="chDept"></canvas></div></div>
+          <div class="card"><div class="ct">Active Headcount by Office</div><div class="cb"><canvas id="chOff"></canvas></div></div></div>
+        <div class="card"><div class="ct">Workforce Summary</div><div id="dashWf" class="tw"></div></div>
+      </section>
+
+      <section id="page-workforce" class="page"><div class="ph"><div><h2>Workforce</h2><p>Department and designation summary</p></div></div>
+        <div class="card"><div id="wfTable" class="tw"></div></div></section>
+
+      <section id="page-capacity" class="page"><div class="ph"><div><h2>Capacity Overview</h2><p>Team-wise PTN, BULK and process capacity</p></div></div>
+        <div class="card"><div id="capTable" class="tw"></div></div></section>
+
+      <section id="page-turnover" class="page"><div class="ph"><div><h2>Turnover Analytics</h2><p>Monthly joining, resignation and turnover</p></div></div>
+        <div class="card"><div class="tb"><div class="f"><label>Year</label><select id="tYear"></select></div><div class="f"><label>Month</label><select id="tMonth"></select></div>
+          <div class="f"><label>Department</label><select id="tDept"></select></div><div class="f"><label>Team Filter</label><select id="tTeam"></select></div>
+          <button class="btn btn-p" onclick="loadTurnover()">Run</button></div></div>
+        <div class="card"><div class="ct">Opening vs Closing Headcount</div><div class="cb"><canvas id="chTurn"></canvas></div></div>
+        <div class="card"><div class="ct">Monthly Trend</div><div id="tTable" class="tw"></div></div>
+        <div class="card"><div class="ct" id="tTeamTitle">Team-wise Breakdown</div><div id="tTeamTable" class="tw"></div></div></section>
+
+      <section id="page-forecast" class="page"><div class="ph"><div><h2>Order & Manpower Forecast</h2><p>Scenario-based manpower planning</p></div></div>
+        <div class="card"><div class="grid g3" id="fForm"></div>
+          <button class="btn btn-p" style="margin-top:16px" onclick="runForecast()">Calculate Forecast</button></div>
+        <div id="fRes" class="grid g4"></div></section>
+
+      <section id="page-resources" class="page"><div class="ph"><div><h2>Resource List</h2><p>Search and view employees</p></div></div>
+        <div class="card"><div class="tb"><div class="f" style="flex:2"><label>Search</label><input id="rSearch" placeholder="ID, name, email, mobile..." onkeydown="if(event.key==='Enter')loadResources()"></div>
+          <div class="f"><label>Department</label><select id="rDept"></select></div><div class="f"><label>Team</label><select id="rTeam"></select></div><div class="f"><label>Status</label><select id="rStatus"><option value="All">All</option><option value="Active">Active</option><option value="Deactive">Deactive</option></select></div>
+          <button class="btn btn-p" onclick="loadResources()">Search</button><button class="btn btn-l" onclick="exportFull('r')">⬇ Full Employee Data</button></div></div>
+        <div class="card"><div id="rTable" class="tw"></div></div></section>
+
+      <section id="page-profile" class="page"><div class="ph"><div><h2>Employee Profile</h2><p>Complete employee information</p></div></div>
+        <div class="card"><div class="tb"><div class="f"><label>Employee ID</label><input id="pId" placeholder="Enter Employee ID" onkeydown="if(event.key==='Enter')loadProfile()"></div>
+          <button class="btn btn-p" onclick="loadProfile()">View Profile</button></div></div><div id="pContent"></div></section>
+
+      <section id="page-attendance" class="page"><div class="ph"><div><h2>Attendance</h2><p>Live sync from Attendance spreadsheet · Weekend/Week → Day Off · cycle 21st → 20th</p></div></div>
+        <div class="card"><div class="tb"><div class="f" style="flex:2"><label>Month (cycle)</label><select id="aMonth" onchange="loadAttWeekendOptions()"></select></div>
+          <div class="f"><label>Group</label><select id="aGroup" onchange="loadAttWeekendOptions()"><option>All</option><option>Operator</option><option>Management</option></select></div>
+          <div class="f"><label>Department</label><select id="aDept"></select></div><div class="f"><label>Weekend / Week</label><select id="aWeekend"><option value="All">All</option></select></div>
+          <div class="f"><label>Search</label><input id="aSearch" placeholder="ID / name" onkeydown="if(event.key==='Enter')loadAtt()"></div>
+          <button class="btn btn-p" onclick="loadAtt()">Load</button></div></div>
+        <div id="aKpis" class="grid g4" style="margin-bottom:16px"></div>
+        <div class="card"><div class="ct">Department Summary</div><div id="aDeptTable" class="tw"></div></div>
+        <div class="card"><div class="ct">Employee Attendance Summary</div><div id="aTable" class="tw"></div></div>
+      </section>
+
+      <section id="page-orderCost" class="page">
+        <div class="ph"><div><h2>Order & Cost Analytics</h2><p>MOM Order + Salary · Department and month-wise order data from the MOM Order sheet</p></div></div>
+        <div class="card"><div class="tb"><div class="f"><label>Month</label><select id="ocMonth"></select></div><button class="btn btn-p" onclick="loadOrderCost()">Run Report</button></div></div>
+        <div id="ocKpis" class="grid g4" style="margin-bottom:16px"></div>
+        <div class="card"><div class="ct">Order Qty Trend</div><div class="muted" style="margin-bottom:10px">Month-wise Total Order from the MOM Order sheet. Source: A:A Department list → Total Order. No filter.</div><div style="height:300px"><canvas id="ocOrderTrendChart"></canvas></div></div>
+        <div class="card"><div class="ct">Department-wise Resource / Attendance</div><div class="muted" style="margin-bottom:10px">Order Qty is taken department-wise from the selected month in the MOM Order sheet. P.P = Department Salary ÷ Total Order.</div><div id="ocTable" class="tw"></div></div>
+        <div class="card"><div class="ct">Cost Trend</div><div class="muted" style="margin-bottom:10px">Month-wise payroll trend based on Active and Deactive resources. No filter.</div><div style="height:300px"><canvas id="ocCostTrendChart"></canvas></div></div>
+        <div class="card"><div class="tb"><div><div class="ct" style="margin:0">MoM Cost Comparison</div><div class="muted">Selected month vs previous available month</div></div><div class="f"><label>Month</label><select id="momMonth"></select></div><button class="btn btn-p" onclick="loadMomCost()">Run Report</button></div><div id="momTable" class="tw"></div></div>
+      </section>
+
+      <section id="page-salary" class="page"><div class="ph"><div><h2>Salary Analytics</h2><p>Active payroll and department analysis</p></div></div><div id="salContent"></div></section>
+      <section id="page-salaryHistory" class="page"><div class="ph"><div><h2>Salary History</h2><p>All salary change records</p></div></div>
+        <div class="card"><div id="shTable" class="tw"></div></div></section>
+      <section id="page-reports" class="page"><div class="ph"><div><h2>Management Reports</h2><p>Aging, contract, data quality and assets</p></div></div><div id="repContent"></div></section>
+      <section id="page-logs" class="page"><div class="ph"><div><h2>App Logs</h2><p>Latest activity</p></div><button class="btn btn-p" onclick="loadLogs()">Refresh</button></div>
+        <div class="card"><div id="logTable" class="tw"></div></div></section>
+      <section id="page-config" class="page"><div class="ph"><div><h2>Resource Config</h2><p>Team, capacity and link configuration</p></div><button class="btn btn-p" onclick="openConfig()">+ Add Config</button></div>
+        <div class="card"><div id="cfgTable" class="tw"></div></div></section>
+    </div>
+  </main>
+</section>
+
+<div id="modal" class="modal" onclick="if(event.target.id==='modal')closeModal()"><div class="mb" id="mb"></div></div>
+<div id="loading" class="hidden"><div class="spin">Please wait...</div></div>
+<div id="toast"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const S={email:'',user:null,boot:null,token:''};let CH={};
+const esc=v=>String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const num=v=>v==null?'—':Number(v||0).toLocaleString('en-US',{maximumFractionDigits:2});
+const tk=v=>v==null?'—':'৳ '+Number(v||0).toLocaleString('en-US',{maximumFractionDigits:0});
+const pp=v=>v==null?'—':'৳ '+Number(v||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const srv=(fn,...a)=>new Promise((ok,no)=>google.script.run.withSuccessHandler(ok).withFailureHandler(e=>{
+ const m=e&&e.message?e.message:String(e);
+ if(/SESSION_EXPIRED/.test(m)){const x=new Error('Your session has expired. Please sign in again.');x.expired=true;setTimeout(()=>showLogin(x.message,'err'),0);return no(x)}
+ no(new Error(m.replace(/^Error:\s*/,'')))})[fn](...a));
+const load=b=>$('loading').classList.toggle('hidden',!b);
+function toast(m,t){const d=document.createElement('div');d.className='t '+(t||'');d.textContent=m;$('toast').appendChild(d);setTimeout(()=>d.remove(),t==='e'?7000:3500)}
+async function run(fn,spin=true){if(spin)load(true);try{return await fn()}catch(e){if(!e.expired)toast(e.message,'e')}finally{if(spin)load(false)}}
+function table(cols,rows,empty){if(!rows||!rows.length)return'<div class="empty">'+(empty||'No data found.')+'</div>';
+ return'<table><thead><tr>'+cols.map(c=>'<th>'+c[0]+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+cols.map(c=>'<td>'+c[1](r)+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}
+function chart(id,cfg){if(CH[id])CH[id].destroy();CH[id]=new Chart($(id),Object.assign({options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}}}},cfg))}
+
+/* LOGIN (email verification code) */
+let resendTimer=null,pendingEmail='';
+const showErr=m=>{$('loginNote').classList.add('hidden');const er=$('loginError');er.textContent=m;er.classList.remove('hidden')};
+const showNote=m=>{$('loginError').classList.add('hidden');const n=$('loginNote');n.textContent=m;n.classList.remove('hidden')};
+const hideMsg=()=>{$('loginError').classList.add('hidden');$('loginNote').classList.add('hidden')};
+function startResend(sec){const b=$('resendBtn');clearInterval(resendTimer);let s=sec;b.disabled=true;
+ const tick=()=>{if(s<=0){clearInterval(resendTimer);b.disabled=false;b.textContent='Resend code';return}b.textContent='Resend in '+s+'s';s--};
+ tick();resendTimer=setInterval(tick,1000)}
+function loginStep(step){
+ const code=step==='code';
+ $('stEmail').classList.toggle('hidden',code);$('stCode').classList.toggle('hidden',!code);
+ $('loginTitle').textContent=code?'Verify your identity':'Sign in';
+ $('loginSub').innerHTML=code?'We sent a 6-digit verification code to <b>'+esc(pendingEmail)+'</b>.':'Enter your official email address. We will send you a one-time verification code.'}
+async function sendCode(isResend){
+ hideMsg();
+ const email=isResend===true?pendingEmail:$('loginEmail').value.trim().toLowerCase();
+ if(!email)return showErr('Please enter your email address.');
+ if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return showErr('Please enter a valid email address.');
+ load(true);
+ try{const r=await srv('sendLoginCode',email);
+  if(!r.success)return showErr(r.message||'Unable to send the verification code.');
+  pendingEmail=email;loginStep('code');
+  $('loginCode').value='';$('loginCode').focus();startResend(r.resendWait||45);
+  showNote('Verification code sent. Please check your inbox.');
+ }catch(e){showErr(e.message)}finally{load(false)}}
+async function verifyCode(){
+ hideMsg();
+ const code=$('loginCode').value.trim();
+ if(!/^\d{6}$/.test(code))return showErr('Please enter the 6-digit code.');
+ load(true);
+ try{const r=await srv('verifyLoginCode',pendingEmail,code);
+  if(!r.success)return showErr(r.message||'Verification failed.');
+  S.email=r.user.email;S.user=r.user;S.boot=r.bootstrap;S.token=r.token;
+  try{sessionStorage.setItem('CB_TOKEN',r.token)}catch(e){}
+  clearInterval(resendTimer);openApp();
+ }catch(e){showErr(e.message)}finally{load(false)}}
+function backToEmail(){clearInterval(resendTimer);hideMsg();pendingEmail='';loginStep('email');$('loginEmail').focus()}
+// Returns the app to a clean login screen (used by logout and session expiry).
+function showLogin(msg,kind){
+ clearInterval(resendTimer);
+ Object.keys(CH).forEach(k=>{try{CH[k].destroy()}catch(e){}});CH={};
+ try{sessionStorage.removeItem('CB_TOKEN');sessionStorage.removeItem('CB_EMAIL')}catch(e){}
+ S.email='';S.user=null;S.boot=null;S.token='';OC=null;ATTM=null;CFG=[];pendingEmail='';
+ closeModal();
+ document.querySelectorAll('.page').forEach(e=>e.classList.remove('active'));
+ ['rTable','pContent','salContent','repContent','shTable','logTable','cfgTable','aTable','aDeptTable','aKpis','fRes','momTable','ocTable','ocKpis'].forEach(i=>{const e=$(i);if(e)e.innerHTML=''});
+ $('aMonth').innerHTML='';$('rSearch').value='';$('pId').value='';
+ $('app').classList.add('hidden');$('login').classList.remove('hidden');
+ $('loginEmail').value='';$('loginCode').value='';loginStep('email');hideMsg();
+ if(msg)(kind==='err'?showErr:showNote)(msg);
+ $('loginEmail').focus()}
+async function autoLogin(){let tok='';try{tok=sessionStorage.getItem('CB_TOKEN')||''}catch(e){}
+ if(!tok)return;load(true);
+ try{const r=await srv('getBootstrap',tok);
+  if(r&&r.authorized){S.email=r.user.email;S.user=r.user;S.boot=r.bootstrap;S.token=tok;openApp()}
+  else try{sessionStorage.removeItem('CB_TOKEN')}catch(e){}}
+ catch(e){try{sessionStorage.removeItem('CB_TOKEN')}catch(x){}}finally{load(false)}}
+async function logout(){load(true);try{await srv('logout',S.token)}catch(e){}finally{load(false)}showLogin('You have been signed out successfully.','ok')}
+
+/* NAV */
+const PAGES=[['Overview'],['dashboard','Dashboard','▦'],['workforce','Workforce','👥'],['capacity','Capacity Overview','⚙'],
+ ['Planning'],['turnover','Turnover Analytics','↻'],['forecast','Order & Manpower Forecast','◔'],
+ ['Resources'],['resources','Resource List','☰'],['profile','Employee Profile','◉'],['attendance','Attendance','🗓'],
+ ['Reports'],['orderCost','Order & Cost Analytics','📦','orderCostView'],['salary','Salary Analytics','৳','salaryView'],['salaryHistory','Salary History','🕘','salaryView'],['reports','Management Reports','📊'],
+ ['Administration'],['logs','App Logs','📋','configEdit'],['config','Resource Config','🛠','configEdit']];
+const TITLES={};
+function buildNav(){let h='';PAGES.forEach(p=>{if(p.length===1)h+='<div class="ns">'+p[0]+'</div>';
+ else if(!p[3]||S.user[p[3]]){TITLES[p[0]]=p[1];h+='<button data-p="'+p[0]+'" onclick="showPage(\''+p[0]+'\')"><i>'+p[2]+'</i>'+p[1]+'</button>'}});$('nav').innerHTML=h}
+function openApp(){$('login').classList.add('hidden');$('app').classList.remove('hidden');
+ $('uname').textContent=S.user.name||S.email;$('av').textContent=(S.user.name||S.email).charAt(0).toUpperCase();
+ buildNav();fillFilters();decorate();renderDash(S.boot.dashboard);buildForecastForm();showPage('dashboard')}
+function showPage(p){document.querySelectorAll('.page').forEach(e=>e.classList.remove('active'));$('page-'+p).classList.add('active');
+ document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.p===p));
+ $('title').textContent=TITLES[p]||p;$('side').classList.remove('open');
+ ({orderCost:initOrderCost,salary:loadSalary,salaryHistory:loadSalHist,reports:loadReports,logs:loadLogs,config:loadConfig,turnover:loadTurnover,attendance:initAtt,forecast:loadForecastDefaults,resources:()=>{if(!$('rTable').innerHTML)loadResources()}})[p]?.()}
+
+/* FILTERS */
+function fillSel(id,vals){$(id).innerHTML='<option value="All">All</option>'+vals.map(v=>'<option>'+esc(v)+'</option>').join('')}
+function fillFilters(){const b=S.boot;
+ fillSel('dDept',b.departments);fillSel('rDept',b.departments);fillSel('tDept',b.departments);
+ ['dTeam','rTeam','tTeam'].forEach(i=>fillSel(i,b.teams));fillSel('dOffice',b.offices);
+ $('tYear').innerHTML=b.years.map(y=>'<option>'+y+'</option>').join('');
+ $('tMonth').innerHTML='<option value="">All months</option>'+MN.map((m,i)=>'<option value="'+(i+1)+'">'+m+'</option>').join('');
+ $('dYear').innerHTML='<option value="">Live (Today)</option>'+b.years.map(y=>'<option>'+y+'</option>').join('');
+ $('dMonth').innerHTML='<option value="">All months</option>'+MN.map((m,i)=>'<option value="'+(i+1)+'">'+m+'</option>').join('')}
+const MN=['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+/* DASHBOARD */
+function renderDash(d){const k=d.kpis,p=d.period||{},al=d.alerts||{};
+ const hr=new Date().getHours(),gr=hr<12?'Good morning':hr<17?'Good afternoon':'Good evening';
+ $('hGreet').textContent=gr+', '+(S.user.name||'there')+' 👋';
+ $('hSub').textContent='Showing: '+(p.label||'Live')+' · '+num(k.active)+' active of '+num(k.total)+' resources';
+ const ch=[];if(al.contractExpired)ch.push('<span class="chip r">⚠ '+al.contractExpired+' contract expired</span>');
+ if(al.contractSoon)ch.push('<span class="chip a">⏳ '+al.contractSoon+' contract ≤ 30 days</span>');
+ if(al.missingData)ch.push('<span class="chip">🗂 '+al.missingData+' incomplete records</span>');
+ if(!ch.length)ch.push('<span class="chip g">✓ All clear</span>');$('hChips').innerHTML=ch.join('');
+ const c=[['Total Resource',num(k.total),'In selected scope','👥','#2563eb'],['Active',num(k.active),p.live?'Current active':'Active at period end','✅','#16a34a'],
+ ['Deactive',num(k.deactive),'Inactive','⛔','#dc2626'],['Joined',num(k.joinThisMonth),p.label||'','🆕','#0891b2'],
+ ['Deactivated',num(k.deactiveThisMonth),p.label||'','🚪','#d97706'],['Attrition',num(k.attritionPct)+'%',p.label||'','📉','#be123c'],
+ ['Monthly Payroll',k.payroll==null?'Restricted':tk(k.payroll),'Active resources','💰','#7c3aed'],['Average Salary',k.averageSalary==null?'Restricted':tk(k.averageSalary),'Active resources','📊','#db2777']];
+ $('kpis').innerHTML=c.map(x=>'<div class="kpi" style="--c:'+x[4]+'"><div class="ki">'+x[3]+'</div><div class="kl">'+x[0]+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>').join('');
+ $('dashWf').innerHTML=wfTable(d.workforce);$('wfTable').innerHTML=wfTable(d.workforce);$('capTable').innerHTML=capTable(d.capacity);
+ const ds=d.designation,PAL=['#2563eb','#0891b2','#16a34a','#f59e0b','#7c3aed','#db2777','#64748b','#ea580c'];
+ chart('chDes',{type:'doughnut',data:{labels:['Executive','Senior Associate','Associate','Operator','Zone Lead'],datasets:[{data:[ds.executive,ds.seniorAssociate,ds.associate,ds.operator,ds.zoneLead],backgroundColor:PAL,borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,cutout:'62%',plugins:{legend:{position:'right'}}}});
+ chart('chJoin',{type:'bar',data:{labels:d.joiningTrend.map(x=>x.month),datasets:[{label:'Joined',data:d.joiningTrend.map(x=>x.count),backgroundColor:'#2563eb',borderRadius:5},{label:'Deactivated',data:d.deactivationTrend.map(x=>x.count),backgroundColor:'#dc2626',borderRadius:5}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},scales:{y:{beginAtZero:true,ticks:{precision:0}}}}});
+ const wf=d.workforce.slice().sort((a,b)=>b.active-a.active).slice(0,10);
+ chart('chDept',{type:'bar',data:{labels:wf.map(x=>x.department),datasets:[{label:'Active',data:wf.map(x=>x.active),backgroundColor:'#2563eb',borderRadius:5}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}}});
+ const of=(d.byOffice||[]).slice(0,8);
+ chart('chOff',{type:'doughnut',data:{labels:of.map(x=>x.office),datasets:[{data:of.map(x=>x.count),backgroundColor:PAL,borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,cutout:'62%',plugins:{legend:{position:'right'}}}})}
+function wfTable(r){return table([['Department',x=>esc(x.department)],['Total',x=>'<b>'+num(x.total)+'</b>'],['Executive',x=>num(x.executive)],['Sr. Associate',x=>num(x.seniorAssociate)],
+ ['Associate',x=>num(x.associate)],['Operator',x=>num(x.operator)],['Active',x=>'<span class="bd b-g">'+num(x.active)+'</span>'],['Deactive',x=>'<span class="bd b-r">'+num(x.deactive)+'</span>'],['Day Off',x=>num(x.dayOff)]],r)}
+function capTable(r){return table([['Department',x=>esc(x.department)],['Team',x=>'<b>'+esc(x.team)+'</b>'],['Office',x=>esc(x.office)],['Zone Lead',x=>esc(x.zoneLead)],
+ ['Operators',x=>num(x.sorterOperator)],['Available',x=>num(x.available)],['PTN/Hr',x=>num(x.ptnRate)],['BULK/Hr',x=>num(x.bulkRate)],['Bulk %',x=>(x.bulkPct*100).toFixed(1)+'%'],
+ ['Process/Hr',x=>num(x.processHourly)],['Normal',x=>num(x.normalCapacity)],['ECT',x=>num(x.ectCapacity)],['Maximum',x=>'<b>'+num(x.maximumCapacity)+'</b>'],
+ ['Status',x=>x.configComplete?'<span class="bd b-g">Ready</span>':'<span class="bd b-a">Incomplete</span>'],
+ ['Links',x=>(x.links||[]).map((u,i)=>'<a class="lk" target="_blank" href="'+esc(u)+'">Link '+(i+1)+'</a>').join('')]],r,'Resource Config not configured.')}
+const refreshDash=()=>run(async()=>{renderDash(await srv('getDashboardData',S.token,{year:$('dYear').value,month:$('dMonth').value,department:$('dDept').value,team:$('dTeam').value,office:$('dOffice').value}))});
+function resetDash(){['dYear','dMonth'].forEach(i=>$(i).value='');['dDept','dTeam','dOffice'].forEach(i=>$(i).value='All');refreshDash()}
+
+/* RESOURCES + PROFILE */
+const loadResources=()=>run(async()=>{const rows=await srv('getResources',S.token,{search:$('rSearch').value,department:$('rDept').value,team:$('rTeam').value,status:$('rStatus').value});
+ $('rTable').innerHTML=table([['ID',x=>'<b>'+esc(x.employeeId)+'</b>'],['Name',x=>esc(x.name)],['Designation',x=>esc(x.designation)],['Department',x=>esc(x.department)],
+ ['Team',x=>esc(x.team)],['Office',x=>esc(x.office)],['Joining',x=>esc(x.joiningDate)],
+ ['Status',x=>'<span class="bd '+(String(x.status).toLowerCase()==='active'?'b-g':'b-r')+'">'+esc(x.status)+'</span>'],['Salary',x=>tk(x.salary)],
+ ['',x=>'<button class="btn btn-l btn-s" data-id="'+esc(x.employeeId)+'" onclick="openEmp(this.dataset.id)">View</button>']],rows,'No resource found.')});
+function openEmp(id){$('pId').value=id;showPage('profile');loadProfile()}
+const pi=(l,v)=>'<div class="pi"><small>'+l+'</small><b>'+esc(v===''||v==null?'—':v)+'</b></div>';
+const sec=(t,items)=>'<div class="card"><div class="ct">'+t+'</div><div class="pg">'+items.join('')+'</div></div>';
+const loadProfile=()=>run(async()=>{const id=$('pId').value.trim();if(!id)return toast('Employee ID is required.','e');
+ const p=await srv('getEmployeeProfile',S.token,id),a=p.assets;
+ $('pContent').innerHTML='<div class="card"><div class="hero"><div class="hav">'+esc((p.name||'?').charAt(0))+'</div><div><h3 style="margin:0">'+esc(p.name)+'</h3><div class="mu">'+esc(p.designation)+' · '+esc(p.employeeId)+'</div></div>'
+  +'<span class="bd '+(String(p.status).toLowerCase()==='active'?'b-g':'b-r')+'" style="margin-left:auto">'+esc(p.status)+'</span></div></div>'
+  +sec('Basic Information',[pi('Department',p.department),pi('Department (Col L)',p.hrDepartment),pi('Division',p.division),pi('Team',p.team),pi('Zone Lead',p.zoneLead),pi('Process',p.process),pi('Office',p.office),pi('Proposed Hub',p.proposedHub)])
+  +sec('Employment',[pi('Joining Date',p.joiningDate),pi('Lead Time',p.leadYM),pi('Line Manager',p.lineManager),pi('Contract Date',p.contractDate),pi('Deactive Date',p.deactiveDate),pi('Deactive Reason',p.deactiveReason),pi('Salary',p.salary===undefined?'Restricted':tk(p.salary))])
+  +sec('Contact',[pi('Official Email',p.officialEmail),pi('Official Mobile',p.officialMobile),pi('Personal Mobile',p.personalMobile)])
+  +sec('Assets',[pi('Laptop Tracking',a.laptop),pi('Serial',a.serial),pi('Mouse',a.mouse),pi('Keyboard',a.keyboard),pi('Headphone',a.headphone),pi('ID Card',a.idCard),pi('Vest',a.vest)])
+  +(p.banking?sec('Banking',[pi('Account Name',p.banking.accountName),pi('Bank Account',p.banking.bankAccount),pi('Bank',p.banking.bankName),pi('Branch',p.banking.branchName),pi('Routing No',p.banking.routingNo),pi('bKash',p.banking.bkash),pi('Nagad',p.banking.nagad)]):'')
+  +(S.user.salaryEdit?'<div class="card"><button class="btn btn-p" id="salBtn">Update Salary</button></div>':'');
+ if($('salBtn'))$('salBtn').onclick=()=>openSalary(p.employeeId,p.name,p.salary||0);
+ attachAttendance(p.employeeId)});
+
+/* ORDER & COST ANALYTICS */
+let OC=null;
+function initOrderCost(){
+ if(OC)return loadOrderCost();
+ OC={};
+ run(async()=>{
+  const m=await srv('getOrderCostMeta',S.token);
+  $('ocMonth').innerHTML=m.months.map(x=>'<option value="'+esc(x.key)+'">'+esc(x.label)+'</option>').join('');
+  $('momMonth').innerHTML=m.months.map(x=>'<option value="'+esc(x.key)+'">'+esc(x.label)+'</option>').join('');
+  if(m.months.length){$('ocMonth').value=m.months[m.months.length-1].key;$('momMonth').value=m.months[m.months.length-1].key;}
+  await loadOrderCost();
+ });
+}
+async function loadOrderCost(){
+ if(!OC)return;
+ return run(async()=>{
+  const r=await srv('getOrderCostAnalytics',S.token,{month:$('ocMonth').value});
+  if(!r.found){$('ocKpis').innerHTML='<div class="card"><div class="empty">'+esc(r.message||'No MOM Order data found.')+'</div></div>';return;}
+  const k=[
+   ['Total Order',num(r.totals.orderQty),'MOM Order · selected month','📦'],
+   ['Resources',num(r.totals.resourceCount),'Active resources','👥'],
+   ['P.P',pp(r.totals.ppCost),'Active Payroll ÷ Total Order','৳'],
+   ['Payroll',tk(r.totals.payroll),'Active salary · Salary tab','💰']
+  ];
+  $('ocKpis').innerHTML=k.map(x=>'<div class="kpi"><div class="ki">'+x[3]+'</div><div class="kl">'+x[0]+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>').join('');
+
+  const cols=[
+   ['Department',x=>'<b>'+esc(x.department)+'</b>'],
+   ['Order Qty',x=>num(x.orderQty)],
+   ['Resources',x=>num(x.resourceCount)],
+   ['Salary',x=>tk(x.payroll)],
+   ['P.P',x=>pp(x.ppCost)]
+  ];
+  $('ocTable').innerHTML=table(cols,r.selected,'No department data.');
+  await loadCostTrend();
+  await loadMomCost();
+ });
+}
+async function loadCostTrend(){
+ if(!OC||!$('ocOrderTrendChart')||!$('ocCostTrendChart'))return;
+ return run(async()=>{
+  const r=await srv('getOrderCostReports',S.token,{type:'trend'});
+  const rows=r.rows||[];
+  chart('ocOrderTrendChart',{type:'line',data:{labels:rows.map(x=>x.label),datasets:[{label:'Total Order',data:rows.map(x=>x.orderQty),borderColor:'#2563eb',backgroundColor:'rgba(37,99,235,.10)',fill:true,tension:.3,pointRadius:3,pointHoverRadius:5}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},scales:{y:{beginAtZero:true,ticks:{callback:function(v){return Number(v).toLocaleString();}}}}}});
+  chart('ocCostTrendChart',{type:'line',data:{labels:rows.map(x=>x.label),datasets:[{label:'Active Payroll',data:rows.map(x=>x.activePayroll),borderColor:'#16a34a',backgroundColor:'rgba(22,163,74,.08)',fill:false,tension:.3,pointRadius:3},{label:'Deactive Payroll',data:rows.map(x=>x.deactivePayroll),borderColor:'#dc2626',backgroundColor:'rgba(220,38,38,.08)',fill:false,tension:.3,pointRadius:3},{label:'Total Payroll',data:rows.map(x=>x.totalPayroll),borderColor:'#7c3aed',backgroundColor:'rgba(124,58,237,.08)',fill:false,tension:.3,pointRadius:3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},scales:{y:{beginAtZero:true,ticks:{callback:function(v){return '৳ '+Number(v).toLocaleString();}}}}}});
+ });
+}
+async function loadMomCost(){
+ if(!OC||!$('momMonth'))return;
+ return run(async()=>{
+  const r=await srv('getOrderCostReports',S.token,{type:'mom',month:$('momMonth').value});
+  $('momTable').innerHTML=table([
+   ['Metric',x=>'<b>'+esc(x.metric)+'</b>'],
+   ['Previous Month',x=>esc(x.previousLabel)],
+   ['Selected Month',x=>esc(x.selectedLabel)],
+   ['Previous',x=>x.metric.indexOf('Payroll')>-1?tk(x.previous):x.metric==='P.P'?pp(x.previous):num(x.previous)],
+   ['Selected',x=>x.metric.indexOf('Payroll')>-1?tk(x.selected):x.metric==='P.P'?pp(x.selected):num(x.selected)],
+   ['MoM Change',x=>esc(x.changeText)]
+  ],r.rows,'No MoM comparison data.');
+ });
+}
+
+/* SALARY */
+function openSalary(id,name,cur){$('mb').innerHTML='<div class="mh"><h3>Update Salary</h3><button class="x" onclick="closeModal()">×</button></div><div class="grid g2">'
+ +'<div><label>Employee ID</label><input id="sId" value="'+esc(id)+'" readonly></div><div><label>Name</label><input value="'+esc(name)+'" readonly></div>'
+ +'<div><label>Current Salary</label><input value="'+tk(cur)+'" readonly></div><div><label>New Salary *</label><input id="sNew" type="number" min="0" value="'+Number(cur||0)+'"></div>'
+ +'<div><label>Effective Date *</label><input id="sDate" type="date" value="'+new Date().toISOString().slice(0,10)+'"></div><div><label>Reason *</label><input id="sReason" placeholder="Reason for change"></div></div>'
+ +'<div style="margin-top:18px;text-align:right"><button class="btn btn-l" onclick="closeModal()">Cancel</button> <button class="btn btn-p" onclick="saveSalary()">Save Salary</button></div>';openModal()}
+const saveSalary=()=>run(async()=>{const r=await srv('updateSalary',S.token,{employeeId:$('sId').value,newSalary:$('sNew').value,effectiveDate:$('sDate').value,reason:$('sReason').value});
+ closeModal();toast('Salary updated: '+r.employeeName+'\n'+tk(r.oldSalary)+' → '+tk(r.newSalary),'ok');loadProfile()});
+const loadSalHist=()=>run(async()=>{const r=await srv('getSalaryHistory',S.token);
+ $('shTable').innerHTML=table([['Timestamp',x=>esc(x.timestamp)],['ID',x=>esc(x.employeeId)],['Name',x=>esc(x.employeeName)],['Old',x=>tk(x.oldSalary)],['New',x=>'<b>'+tk(x.newSalary)+'</b>'],
+ ['Effective',x=>esc(x.effectiveDate)],['Reason',x=>esc(x.reason)],['By',x=>esc(x.updatedBy)]],r,'No salary history found.')});
+const loadSalary=()=>run(async()=>{const d=(await srv('getReports',S.token,{})).salary;
+ if(!d.allowed)return $('salContent').innerHTML='<div class="card"><div class="empty">Salary access is restricted.</div></div>';
+ $('salContent').innerHTML='<div class="grid g4" style="margin-bottom:16px">'+[['Active Payroll',d.activePayroll],['Average Salary',d.average],['Minimum',d.min],['Maximum',d.max]].map(x=>'<div class="kpi"><div class="kl">'+x[0]+'</div><div class="kv">'+tk(x[1])+'</div></div>').join('')+'</div>'
+  +'<div class="card"><div class="ct">Department Salary Analysis</div><div class="tw">'+table([['Department',x=>esc(x.department)],['Headcount',x=>num(x.headcount)],['Payroll',x=>tk(x.payroll)],['Average',x=>tk(x.average)]],d.byDepartment)+'</div></div>'});
+
+/* REPORTS */
+const rl=(l,v)=>'<div class="rl"><span class="mu">'+l+'</span><b>'+esc(v==null?0:v)+'</b></div>';
+const loadReports=()=>run(async()=>{const d=await srv('getReports',S.token,{}),a=d.aging,c=d.contract,q=d.dataQuality,s=d.assets;
+ $('repContent').innerHTML='<div class="grid g3"><div class="card"><div class="ct">Resource Aging</div>'+rl('< 3 Months',a['<3m'])+rl('3–6 Months',a['3-6m'])+rl('6–12 Months',a['6-12m'])+rl('1–2 Years',a['1-2y'])+rl('2+ Years',a['2y+'])+'</div>'
+ +'<div class="card"><div class="ct">Contract Expiry</div>'+rl('Expired',c.expired)+rl('Within 7 Days',c.within7)+rl('Within 30 Days',c.within30)+rl('Within 60 Days',c.within60)+rl('Within 90 Days',c.within90)+'</div>'
+ +'<div class="card"><div class="ct">Data Quality</div>'+rl('Total',q.total)+rl('Valid',q.valid)+rl('Incomplete',q.incomplete)+rl('Duplicate IDs',q.duplicateEmployeeId)+rl('Health',num(q.health)+'%')+'</div></div>'
+ +'<div class="card"><div class="ct">Asset Report (Active)</div><div class="grid g4">'+[['Laptop',s.laptop],['Serial',s.serial],['Mouse',s.mouse],['Keyboard',s.keyboard],['Headphone',s.headphone],['ID Card',s.idCard],['Vest',s.vest]].map(x=>'<div class="kpi"><div class="kl">'+x[0]+'</div><div class="kv">'+num(x[1])+'</div></div>').join('')+'</div></div>'
+ +'<div class="grid g2"><div class="card"><div class="ct">Office Report</div><div class="tw">'+table([['Office',x=>esc(x.office)],['Total',x=>num(x.total)],['Active',x=>num(x.active)],['Deactive',x=>num(x.deactive)]],d.office)+'</div></div>'
+ +'<div class="card"><div class="ct">Manager Report</div><div class="tw">'+table([['Manager',x=>esc(x.manager)],['Active',x=>num(x.active)]],d.manager)+'</div></div></div>'});
+
+/* TURNOVER */
+const loadTurnover=()=>run(async()=>{const d=await srv('getTurnover',S.token,{year:$('tYear').value,month:$('tMonth').value,department:$('tDept').value,team:$('tTeam').value}),sel=Number(d.month||0);
+ $('tTable').innerHTML=table([['Month',x=>'<b>'+x.month+'</b>'+(x.idx===sel?' <span class="bd b-b">Selected</span>':'')],['Opening',x=>num(x.opening)],['Join',x=>'<span class="bd b-g">'+num(x.join)+'</span>'],['Resigned',x=>'<span class="bd b-r">'+num(x.resigned)+'</span>'],['Closing',x=>num(x.active)],['Turnover %',x=>num(x.turnover)+'%']],d.rows);
+ $('tTeamTitle').textContent='Team-wise Breakdown · '+d.periodLabel+' · Source: Data sheet L:L (Department)';
+ $('tTeamTable').innerHTML=table([['Team',x=>'<b>'+esc(x.team)+'</b>'],['Opening',x=>num(x.opening)],['Join',x=>'<span class="bd b-g">'+num(x.join)+'</span>'],['Resigned',x=>'<span class="bd b-r">'+num(x.resigned)+'</span>'],['Closing',x=>num(x.active)],['Turnover %',x=>'<span class="bd '+(x.turnover>=10?'b-r':x.turnover>=5?'b-a':'b-g')+'">'+num(x.turnover)+'%</span>']],d.teams,'No team data for this period.');
+ chart('chTurn',{type:'bar',data:{labels:d.rows.map(r=>r.month),datasets:[{type:'line',label:'Closing',data:d.rows.map(r=>r.active),borderColor:'#16a34a',tension:.3,yAxisID:'y'},{type:'line',label:'Opening',data:d.rows.map(r=>r.opening),borderColor:'#2563eb',tension:.3,yAxisID:'y'},{label:'Resigned',data:d.rows.map(r=>r.resigned),backgroundColor:'#dc2626',borderRadius:4,yAxisID:'y1'},{label:'Joined',data:d.rows.map(r=>r.join),backgroundColor:'#93c5fd',borderRadius:4,yAxisID:'y1'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},scales:{y:{position:'left'},y1:{position:'right',grid:{drawOnChartArea:false},beginAtZero:true,ticks:{precision:0}}}}})});
+
+/* FORECAST */
+function buildForecastForm(){
+ const f=(id,l,c)=>'<div class="'+(c||'')+'"><label id="l_'+id+'">'+l+'</label><input id="'+id+'" type="number" step="any"></div>';
+ $('fForm').innerHTML='<div><label>Department</label><select id="fDept" onchange="loadForecastDefaults()"></select></div><div><label>Team</label><select id="fTeam" onchange="loadForecastDefaults()"></select></div>'
+ +'<div><label>Calculation Method</label><select id="fMethod" onchange="toggleMethod()"><option value="ptnbulk">PTN + BULK (rate based)</option><option value="single">Single Rate (orders / resource / hour)</option></select></div>'
+ +f('fOrders','Total Orders')+f('fHours','Working Hours')+f('fPtnRate','PTN / Operator / Hour')
+ +f('fBulkRate','BULK / Operator / Hour','bo')+f('fBulkPct','BULK %','bo')+f('fPtnPct','PTN %','bo')
+ +f('fOps','Active Resources')+f('fOff','Roster Day Off')+f('fEct','ECT Hours')+f('fBuf','Safety Buffer')
+ +'<div style="grid-column:1/-1" class="mu" id="fNote"></div>';
+ fillSel('fDept',S.boot.departments);fillSel('fTeam',S.boot.teams);
+ $('fBulkPct').oninput=()=>{const v=Number($('fBulkPct').value);if($('fBulkPct').value!=='')$('fPtnPct').value=Math.max(0,100-v)}}
+function toggleMethod(){const s=$('fMethod').value==='single';document.querySelectorAll('#fForm .bo').forEach(e=>e.classList.toggle('hidden',s));
+ $('l_fPtnRate').textContent=s?'Orders / Resource / Hour':'PTN / Operator / Hour'}
+function loadForecastDefaults(){if(!$('fDept'))return;return run(async()=>{
+ const d=await srv('getForecastDefaults',S.token,{department:$('fDept').value,team:$('fTeam').value}),set=(i,v)=>$(i).value=v||'';
+ $('fMethod').value=d.method;toggleMethod();
+ set('fOps',d.activeOperators);set('fOff',d.dayOff);set('fPtnRate',d.ptnRate?+d.ptnRate.toFixed(2):'');set('fBulkRate',d.bulkRate?+d.bulkRate.toFixed(2):'');
+ set('fBulkPct',d.bulkPct?+(d.bulkPct*100).toFixed(1):'');set('fPtnPct',d.bulkPct?+((1-d.bulkPct)*100).toFixed(1):'');
+ set('fHours',d.shiftHours?Math.max(0,d.shiftHours-d.breakHours):'');set('fEct',d.ectHours);set('fBuf',d.safetyBuffer);
+ $('fNote').innerHTML='Scope: <b>'+esc($('fDept').value)+'</b> / <b>'+esc($('fTeam').value)+'</b> · Basis: '+(d.basis==='operator'?'active operators':'all active resources')+' ('+d.activeOperators+') · Method auto-detected from Resource Config'
+  +(d.configCount?'':' <span class="bd b-a">No config found - enter rate manually</span>')+' · Day off: '+(d.dayOffSource==='attendance'?'today\'s attendance (off + leave)':'manual')},false)}
+const runForecast=()=>run(async()=>{const v=i=>$(i).value,single=v('fMethod')==='single';
+ const r=await srv('calculateForecast',S.token,{method:v('fMethod'),totalOrders:v('fOrders'),workingHours:v('fHours'),ptnPct:single?1:Number(v('fPtnPct'))/100,bulkPct:single?0:Number(v('fBulkPct'))/100,
+  ptnRate:v('fPtnRate'),bulkRate:v('fBulkRate'),activeOperators:v('fOps'),dayOff:v('fOff'),ectHours:v('fEct'),safetyBuffer:v('fBuf')});
+ const cls=r.status==='Normal Capacity Sufficient'?'b-g':r.status==='ECT Required'?'b-a':'b-r';
+ $('fRes').innerHTML=[['Hourly Requirement',r.hourlyRequirement],['Required Manpower',r.requiredManpower],['Available Manpower',r.available],['Manpower Gap',r.manpowerGap],
+  ['Normal Capacity',r.normalCapacity],['ECT Capacity',r.ectCapacity],['Maximum Capacity',r.maximumCapacity],['Additional Resource',r.additionalResource]]
+  .map(x=>'<div class="kpi"><div class="kl">'+x[0]+'</div><div class="kv">'+num(x[1])+'</div></div>').join('')
+  +'<div class="card" style="grid-column:1/-1"><div class="ct">Forecast Status · '+esc($('fDept').value)+' / '+esc($('fTeam').value)+'</div><span class="bd '+cls+'">'+esc(r.status)+'</span> <span class="bd b-b">'+(r.method==='single'?'Single Rate':'PTN + BULK')+'</span><div class="mu" style="margin-top:10px">Utilization: <b>'+num(r.utilization)+'%</b></div></div>'});
+
+/* CONFIG */
+const CF=[['department','Department'],['team','Team'],['office','Office'],['zoneLead','Zone Lead'],['manager','Line Manager'],['process','Process'],['ptnRate','PTN / Hour / Operator'],['bulkRate','BULK / Hour / Operator'],
+ ['bulkPct','Bulk %'],['shiftHours','Shift Hours'],['breakHours','Break Hours'],['ectHours','ECT Hours'],['link1','Data Link'],['link2','Data Link 2'],['link3','Data Link 3'],['link4','Data Link 4']];
+let CFG=[];
+const loadConfig=()=>run(async()=>{CFG=await srv('getConfigData',S.token);
+ $('cfgTable').innerHTML=table([['Department',x=>esc(x.department)],['Team',x=>'<b>'+esc(x.team)+'</b>'],['Office',x=>esc(x.office)],['Zone Lead',x=>esc(x.zoneLead)],['Manager',x=>esc(x.manager)],['Process',x=>esc(x.process)],
+ ['PTN',x=>num(x.ptnRate)],['BULK',x=>num(x.bulkRate)],['Bulk %',x=>num(x.bulkPct*100)+'%'],['Shift',x=>num(x.shiftHours)],['Break',x=>num(x.breakHours)],['ECT',x=>num(x.ectHours)],
+ ['',x=>'<button class="btn btn-l btn-s" onclick="openConfig('+x.rowNumber+')">Edit</button>']],CFG,'No Resource Config found.')});
+function openConfig(row){const d=CFG.filter(c=>c.rowNumber===row)[0]||{};
+ $('mb').innerHTML='<div class="mh"><h3>'+(d.rowNumber?'Edit':'Add')+' Resource Config</h3><button class="x" onclick="closeModal()">×</button></div><div class="grid g2">'
+ +CF.map(f=>{let v=d[f[0]];if(f[0]==='bulkPct'&&v)v=+(v*100).toFixed(2);return'<div><label>'+f[1]+(f[0]==='bulkPct'?' (0–100)':'')+'</label><input id="c_'+f[0]+'" value="'+esc(v==null?'':v)+'"></div>'}).join('')
+ +'</div><div style="margin-top:18px;text-align:right"><button class="btn btn-l" onclick="closeModal()">Cancel</button> <button class="btn btn-p" onclick="saveConfig('+(d.rowNumber||0)+')">Save</button></div>';openModal()}
+const saveConfig=row=>run(async()=>{const p={mode:row?'update':'add',rowNumber:row||''};CF.forEach(f=>p[f[0]]=$('c_'+f[0]).value);
+ p.bulkPct=p.bulkPct===''?0:Number(p.bulkPct)/100;await srv('saveConfig',S.token,p);closeModal();toast('Resource Config saved.','ok');loadConfig()});
+
+/* LOGS */
+const loadLogs=()=>run(async()=>{const r=await srv('getAppLogs',S.token,500);
+ $('logTable').innerHTML=table([['Timestamp',x=>esc(x.timestamp)],['Email',x=>esc(x.email)],['Action',x=>'<span class="bd b-b">'+esc(x.action)+'</span>'],['Details',x=>'<span class="mu">'+esc(x.details)+'</span>'],['Source',x=>esc(x.source)]],r,'No logs found.')});
+
+
+/* FULL EMPLOYEE EXPORT */
+const TEXT_COLS=['Official Mobile','Personal Mobile','Bank Account','Routing No','bKash','Nagad','Employee ID'];
+const exportFull=src=>run(async()=>{
+ const f=src==='r'?{search:$('rSearch').value,department:$('rDept').value,team:$('rTeam').value,status:$('rStatus').value}
+  :{year:$('dYear').value,month:$('dMonth').value,department:$('dDept').value,team:$('dTeam').value,office:$('dOffice').value};
+ const d=await srv('getFullExport',S.token,f);
+ if(!d.rows.length)return toast('No data to export.','e');
+ const q=(v,i)=>{v=String(v==null?'':v).replace(/"/g,'""');return TEXT_COLS.indexOf(d.headers[i])>-1&&v!==''?'="'+v+'"':'"'+v+'"'};
+ const lines=[d.headers.map((x,i)=>'"'+x+'"').join(',')].concat(d.rows.map(r=>r.map(q).join(',')));
+ const blob=new Blob(['\ufeff'+lines.join('\n')],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');
+ a.href=URL.createObjectURL(blob);a.download='employee_full_data_'+new Date().toISOString().slice(0,10)+'.csv';document.body.appendChild(a);a.click();a.remove();
+ toast('Exported '+d.rows.length+' employees.','ok')});
+
+/* EXPORT + THEME */
+function decorate(){document.querySelectorAll('.tw').forEach(el=>{if(el.dataset.x)return;el.dataset.x=1;
+ const d=document.createElement('div');d.className='exp';d.innerHTML='<button class="btn btn-l btn-s" onclick="exportCsv(\''+el.id+'\')">⬇ Export CSV</button>';el.parentNode.insertBefore(d,el)})}
+function exportCsv(id){const t=$(id).querySelector('table');if(!t)return toast('Nothing to export.','e');
+ const rows=[...t.rows].map(r=>[...r.cells].map(c=>'"'+c.innerText.replace(/"/g,'""').trim()+'"').join(','));
+ const blob=new Blob(['\ufeff'+rows.join('\n')],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');
+ a.href=URL.createObjectURL(blob);a.download=id+'_'+new Date().toISOString().slice(0,10)+'.csv';document.body.appendChild(a);a.click();a.remove()}
+function applyTheme(t){document.documentElement.dataset.theme=t;$('thBtn')&&($('thBtn').textContent=t==='dark'?'☀️':'🌙');
+ Chart.defaults.color=t==='dark'?'#94a3b8':'#64748b';Chart.defaults.borderColor=t==='dark'?'#1f2b45':'#e5e9f0'}
+function toggleTheme(){const t=document.documentElement.dataset.theme==='dark'?'light':'dark';try{localStorage.setItem('CB_THEME',t)}catch(e){}
+ applyTheme(t);if(S.boot&&!$('app').classList.contains('hidden'))refreshDash()}
+try{applyTheme(localStorage.getItem('CB_THEME')||'light')}catch(e){applyTheme('light')}
+
+/* ATTENDANCE */
+let ATTM=null;
+async function attMonths(){if(!ATTM)ATTM=await srv('getAttendanceMonths',S.token);return ATTM}
+function fillAttSel(id,ms){const cur=ms.filter(m=>m.current)[0]||ms[0];$(id).innerHTML=ms.map(m=>'<option value="'+m.key+'"'+(cur&&m.key===cur.key?' selected':'')+'>'+m.label+'  ('+m.range+')</option>').join('')}
+function calHtml(d){
+ if(!d.found)return'<div class="empty">'+esc(d.message||'No attendance data.')+'</div>';
+ const s=d.summary||{},c=d.counts||{},g=(k,alt)=>s[k]==null?alt:s[k],hol=(s.holiday||0)+(s.publicHoliday||0);
+ const chips=[['Present',g('present',c.P)],['Absent',g('absent',c.A)],['Leave',g('leave',c.L)],['Off Day',g('offDay',c.OFF)],['Holiday',hol||c.H],['OT',s.ot||0],['Late',s.late||0],['Early',s.early||0],['Night Shift',s.nightShift||0],['Cut Days',s.cutDays||0],['Total',s.total==null?'—':s.total]];
+ const t=new Date(),ti=t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0');
+ let cells=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(x=>'<div class="dh">'+x+'</div>').join('');
+ for(let i=0;i<(d.dates[0].dow+6)%7;i++)cells+='<div class="cd e0"></div>';
+ d.dates.forEach((x,i)=>{const code=d.codes[i],cl=d.classes[i]||'N';
+  cells+='<div class="cd '+cl+(x.iso===ti?' today':'')+'"><small>'+x.label+'</small><b title="'+esc(code)+'">'+(code?esc(code.length>7?code.slice(0,7)+'…':code):'—')+'</b></div>'});
+ return'<div class="sumchips">'+chips.map(x=>'<div class="sc">'+x[0]+'<b>'+esc(x[1])+'</b></div>').join('')+'</div><div class="cal">'+cells+'</div>'
+  +'<div class="legend"><span class="bd b-g">Present</span><span class="bd b-r">Absent</span><span class="bd b-a">Leave</span><span class="bd" style="background:#e2e8f0">Off</span><span class="bd" style="background:#ede9fe;color:#5b21b6">Holiday</span><span>Sheet: '+esc(d.tab)+'</span>'+(s.remarks?'<span>Remarks: '+esc(s.remarks)+'</span>':'')+'</div>'}
+async function attachAttendance(id){
+ $('pContent').insertAdjacentHTML('beforeend','<div class="card"><div class="ct" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">Attendance<select id="pAttMonth" style="max-width:340px"></select></div><div id="pAttBody"><div class="empty">Loading attendance...</div></div></div>');
+ try{const ms=await attMonths();if(!ms.length){$('pAttBody').innerHTML='<div class="empty">No attendance tabs found.</div>';return}
+  fillAttSel('pAttMonth',ms);$('pAttMonth').onchange=()=>loadEmpAtt(id);await loadEmpAtt(id)}
+ catch(e){const b=$('pAttBody');if(b)b.innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
+async function loadEmpAtt(id){const b=$('pAttBody');b.innerHTML='<div class="empty">Loading...</div>';
+ try{b.innerHTML=calHtml(await srv('getEmployeeAttendance',S.token,id,$('pAttMonth').value))}catch(e){b.innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
+async function initAtt(){try{const ms=await attMonths();if(!$('aMonth').options.length){fillAttSel('aMonth',ms);fillSel('aDept',S.boot.departments)}await loadAttWeekendOptions();await loadAtt()}catch(e){toast(e.message,'e')}}
+async function loadAttWeekendOptions(){try{const vals=await srv('getAttendanceWeekendOptions',S.token,$('aMonth').value,$('aGroup').value),cur=$('aWeekend').value;$('aWeekend').innerHTML='<option value="All">All</option>'+vals.map(v=>'<option>'+esc(v)+'</option>').join('');if(vals.indexOf(cur)>-1)$('aWeekend').value=cur;}catch(e){toast(e.message,'e')}}
+const loadAtt=()=>run(async()=>{
+ const d=await srv('getAttendanceReport',S.token,{key:$('aMonth').value,group:$('aGroup').value,department:$('aDept').value,weekend:$('aWeekend').value,search:$('aSearch').value}),t=d.totals;
+ if(d.missing.length)toast('Attendance tab not found: '+d.missing.join(', ')+' ('+d.label+')','e');
+ $('aKpis').innerHTML=[['Employees',t.headcount,'👥','#2563eb'],['Present days',t.present,'✅','#16a34a'],['Absent days',t.absent,'⛔','#dc2626'],['Leave days',t.leave,'🌴','#d97706'],['Off days',t.offDay,'🛌','#64748b'],['Late',t.late,'⏰','#be123c'],['OT',t.ot,'🕒','#7c3aed'],['Absent %',num(t.absentPct)+'%','📉','#db2777']]
+  .map(x=>'<div class="kpi" style="--c:'+x[3]+'"><div class="ki">'+x[2]+'</div><div class="kl">'+x[0]+'</div><div class="kv">'+esc(x[1])+'</div></div>').join('');
+ $('aDeptTable').innerHTML=table([['Department',x=>'<b>'+esc(x.department)+'</b>'],['Employees',x=>num(x.headcount)],['Present',x=>num(x.present)],['Absent',x=>'<span class="bd b-r">'+num(x.absent)+'</span>'],['Leave',x=>num(x.leave)],['Day Off',x=>num(x.offDay)],['Weekend Worked',x=>num(x.weekendDays)],['Late',x=>num(x.late)],['OT',x=>num(x.ot)],['Absent %',x=>num(x.absentPct)+'%']],d.departments,'No attendance data.');
+ $('aTable').innerHTML=table([['ID',x=>'<b>'+esc(x.id)+'</b>'],['Name',x=>esc(x.name)],['Designation',x=>esc(x.designation)],['Department',x=>esc(x.department)],['Group',x=>esc(x.group)],['Weekend',x=>esc(x.weekend||'—')],['Present',x=>'<span class="bd b-g">'+num(x.present)+'</span>'],['Absent',x=>'<span class="bd b-r">'+num(x.absent)+'</span>'],['Leave',x=>num(x.leave)],['Day Off',x=>num(x.offDay)],['Weekend Worked',x=>num(x.weekendDays)],['Holiday',x=>num(x.holiday)],['Late',x=>num(x.late)],['OT',x=>num(x.ot)],['Night',x=>num(x.nightShift)],['Cut Days',x=>num(x.cutDays)],['Total',x=>esc(x.total)],
+  ['',x=>'<button class="btn btn-l btn-s" data-id="'+esc(x.id)+'" onclick="openEmp(this.dataset.id)">View</button>']],d.rows,'No attendance data.')});
+
+/* MODAL / START */
+const openModal=()=>$('modal').classList.add('show'),closeModal=()=>$('modal').classList.remove('show');
+window.addEventListener('load',autoLogin);
+</script>
+</body>
+</html>

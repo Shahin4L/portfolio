@@ -1,0 +1,73 @@
+section,label,metric,value
+headcount,Sort Operation,active,49
+headcount,Sort Operation,left,107
+headcount,Central Inbound Operation,active,28
+headcount,Central Inbound Operation,left,6
+headcount,Return Parcel Validation,active,14
+headcount,Return Parcel Validation,left,13
+headcount,Data Entry Operation,active,14
+headcount,Data Entry Operation,left,12
+headcount,Sub Sort (all locations),active,14
+headcount,Sub Sort (all locations),left,7
+headcount,Central Return,active,8
+headcount,Central Return,left,4
+headcount,Other small teams,active,9
+headcount,Other small teams,left,2
+headcount,Reprocessing & Resolution,active,3
+headcount,Reprocessing & Resolution,left,7
+headcount,Issue Resolution,active,6
+headcount,Issue Resolution,left,0
+exits,Exits (all time),resigned,144
+exits,Exits (all time),transferred,14
+attendance,December 25,weekly_off,362
+attendance,December 25,present,2318
+attendance,December 25,leave,62
+attendance,December 25,absent,63
+attendance,January 26,present,2485
+attendance,January 26,weekly_off,430
+attendance,January 26,leave,110
+attendance,January 26,absent,85
+attendance,February 26,present,2612
+attendance,February 26,weekly_off,423
+attendance,February 26,leave,69
+attendance,February 26,absent,69
+attendance,March 26,present,2178
+attendance,March 26,weekly_off,270
+attendance,March 26,off_day_duty,176
+attendance,March 26,leave,33
+attendance,March 26,absent,19
+attendance,April 26,present,2158
+attendance,April 26,weekly_off,386
+attendance,April 26,leave,121
+attendance,April 26,absent,52
+attendance,April 26,off_day_duty,16
+attendance,May 26,present,2385
+attendance,May 26,weekly_off,316
+attendance,May 26,off_day_duty,82
+attendance,May 26,leave,67
+attendance,May 26,absent,41
+attendance,June 26,present,1976
+attendance,June 26,weekly_off,300
+attendance,June 26,off_day_duty,85
+attendance,June 26,leave,62
+attendance,June 26,absent,149
+attendance,July 26,present,2451
+attendance,July 26,weekly_off,345
+attendance,July 26,leave,115
+attendance,July 26,absent,72
+attendance,July 26,off_day_duty,14
+attendance,Aug 26,present,2788
+attendance,Aug 26,weekly_off,450
+attendance,Aug 26,leave,118
+attendance,Aug 26,absent,26
+attendance,Aug 26,off_day_duty,10
+attendance,Sep 26,weekly_off,524
+attendance,Sep 26,present,3051
+attendance,Sep 26,leave,106
+attendance,Sep 26,absent,24
+attendance,Sep 26,off_day_duty,2
+attendance,Oct 26,present,2401
+attendance,Oct 26,weekly_off,386
+attendance,Oct 26,leave,31
+attendance,Oct 26,absent,68
+attendance,Oct 26,off_day_duty,9
