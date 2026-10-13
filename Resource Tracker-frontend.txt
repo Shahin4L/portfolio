@@ -1,0 +1,1379 @@
+/*******************************************************
+ * CENTRAL SORT OPS RESOURCE TRACKER - Code.gs (fixed + email verification login)
+ *******************************************************/
+const APP = {
+  MAIN_ID: '1QEb5S6C-tagfKPkdDmic1l3YF_WNPiHy3X0_YZ4PZUw',
+  AUDIT_ID: '1MhuNC6-sweW568IhBP_i9ndnFUAm54Yj-IbihQ_5Mo0',
+  ATT_ID: '1RKCIfnV_BRYvrbKeIF8k679LUF8Rr1Q7XxtP0qA4w7Q',   // Attendance spreadsheet (tabs: 'Oct 26 (Operator)', 'Oct 26 (Management)')
+  DATA_GID: 1882401080,                 // tomar main link-er gid
+  DATA_SHEET: 'Central Sort Ops Resource Tracker',
+  CONFIG_SHEET: 'Resource Config',
+  LOG_SHEET: 'App Logs',
+  SALARY_SHEET: 'Salary History',
+  SALARY_TAB: 'Salary',                 // current salary (Employee ID, Name, Salary) - LOG spreadsheet
+  ACCESS_SHEET: 'Access Control',
+  MOM_ORDER_SHEET: 'MOM Order',
+  MOM_ORDER_GID: 351443059,             // MOM Order data tab from the supplied sheet link
+  FINAL_DATA_SHEET: 'Final Data',
+  CFG_COL: 17,                          // Q
+  CFG_WIDTH: 16
+};
+
+// Data sheet column order (1-based, A..AM)
+const DC_KEYS = ['SL','OFFICE','SERIES','EMP_ID','EMP_NAME','DESIGNATION','DOJ','STATUS','SALARY','DEACTIVE_DATE',
+ 'DEACTIVE_REASON','DEPARTMENT','HR_DEPARTMENT','DIVISION','MANAGER','EMAIL','OFFICIAL_MOBILE',
+ 'PERSONAL_MOBILE','OFFICE2','CONTRACT_DATE','PROPOSED_HUB','LEAD_YEAR','LEAD_MONTH','LEAD_YM',
+ 'JOINING_MONTH','LAPTOP','SERIAL','MOUSE','KEYBOARD','HEADPHONE','ID_CARD','VEST','ACCOUNT_NAME',
+ 'BANK_ACCOUNT','BANK_NAME','BRANCH_NAME','ROUTING_NO','BKASH','NAGAD'];
+function buildDC_(withSalary) {
+  const o = {};
+  DC_KEYS.filter(function(k){ return withSalary || k !== 'SALARY'; }).forEach(function(k, i){ o[k] = i + 1; });
+  return o;
+}
+let DC = buildDC_(true);   // dataSheet_() re-detects: Salary column delete korle auto shift hoy
+const SAL_HEADERS = ['Employee ID','Employee Name','Salary','Last Updated','Updated By'];
+
+const CFG_HEADERS = ['Department','Team','Office','Zone Lead','Line Manager','Process',
+  'PTN / Hour / Operator','BULK / Hour / Operator','Bulk %','Shift Hours','Break Hours','ECT Hours',
+  'Data Link','Data Link 2','Data Link 3','Data Link 4'];
+
+let _mem = {};   // per-execution cache
+
+/* ================= WEB APP ================= */
+function doGet() {
+  return HtmlService.createTemplateFromFile('Index').evaluate()
+    .setTitle('Central Sort Ops Resource Tracker')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/* ================= SHEET ACCESS ================= */
+function main_() {
+  if (!_mem.main) {
+    try { _mem.main = SpreadsheetApp.openById(APP.MAIN_ID); }
+    catch (e) { throw new Error('MAIN spreadsheet open failed: ' + e.message); }
+  }
+  return _mem.main;
+}
+function audit_() {
+  if (!_mem.audit) {
+    try { _mem.audit = SpreadsheetApp.openById(APP.AUDIT_ID); }
+    catch (e) { throw new Error('The LOG/ACCESS spreadsheet could not be opened. Please verify that the script account has access.\n' + e.message); }
+  }
+  return _mem.audit;
+}
+function nameKey_(s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+
+function dataSheet_() {
+  if (_mem.data) return _mem.data;
+  const ss = main_(), all = ss.getSheets();
+  const want = nameKey_(APP.DATA_SHEET), cfg = nameKey_(APP.CONFIG_SHEET);
+  let sh = all.filter(function(s){ return nameKey_(s.getName()) === want; })[0]
+        || all.filter(function(s){ return s.getSheetId() === APP.DATA_GID && nameKey_(s.getName()) !== cfg; })[0]
+        || all.filter(function(s){
+             if (nameKey_(s.getName()) === cfg || s.getLastColumn() < 5) return false;
+             return s.getRange(1, 1, 1, Math.min(s.getLastColumn(), 45)).getValues()[0]
+               .some(function(h){ return nameKey_(h).indexOf('employee id') > -1 || nameKey_(h) === 'emp id'; });
+           })[0];
+  if (!sh) {
+    throw new Error('Data sheet not found.\nAvailable tabs: ' +
+      all.map(function(s){ return '"' + s.getName() + '"'; }).join(', '));
+  }
+  DC = buildDC_(/salary/i.test(String(sh.getRange(1, 9).getValue())));
+  return (_mem.data = sh);
+}
+function configSheet_(create) {
+  const ss = main_();
+  let sh = ss.getSheets().filter(function(s){ return nameKey_(s.getName()) === nameKey_(APP.CONFIG_SHEET); })[0];
+  if (!sh && create) sh = ss.insertSheet(APP.CONFIG_SHEET);
+  if (sh && create) ensureConfigHeaders_(sh);
+  return sh || null;
+}
+function auditSheet_(name, headers) {
+  const ss = audit_();
+  let sh = ss.getSheets().filter(function(s){ return nameKey_(s.getName()) === nameKey_(name); })[0];
+  if (!sh) sh = ss.insertSheet(name);
+  if (sh.getLastRow() === 0) {
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#eaf2ff');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+function ensureConfigHeaders_(sh) {
+  if (sh.getMaxColumns() < 32) sh.insertColumnsAfter(sh.getMaxColumns(), 32 - sh.getMaxColumns());
+  const cur = sh.getRange(1, APP.CFG_COL, 1, APP.CFG_WIDTH).getValues()[0];
+  if (cur.every(function(v){ return !String(v || '').trim(); })) {
+    sh.getRange(1, APP.CFG_COL, 1, APP.CFG_WIDTH).setValues([CFG_HEADERS]).setFontWeight('bold').setBackground('#eaf2ff');
+  }
+}
+
+/* ================= SETUP (run once) ================= */
+function setupApp() {
+  const data = dataSheet_();
+  const cfg = configSheet_(true);
+  const logs = auditSheet_(APP.LOG_SHEET, ['Timestamp','Email','Action','Details','Source']);
+  const sal = auditSheet_(APP.SALARY_SHEET, ['Timestamp','Employee ID','Employee Name','Old Salary','New Salary','Effective Date','Reason','Updated By']);
+  const acc = auditSheet_(APP.ACCESS_SHEET, ['Email','Name','Role','Salary Edit','Config Edit','Status']);
+  auditSheet_(APP.SALARY_TAB, SAL_HEADERS);
+  seedAccess_(acc);
+  const res = { data: data.getName(), config: cfg.getName(), logs: logs.getName(), salary: sal.getName(), access: acc.getName(), momOrder: APP.MOM_ORDER_SHEET };
+  Logger.log(JSON.stringify(res));
+  return res;
+}
+function seedAccess_(sh) {
+  const have = {};
+  sh.getDataRange().getValues().slice(1).forEach(function(r){ have[normEmail_(r[0])] = 1; });
+  const add = [
+    ['shahin.usbgroup@gmail.com','Shahin','Admin',true,true,true],
+    ['mehedi.asif@carrybee.com','Mehedi Asif','Admin',true,true,true],
+    ['shahin.alam@carrybee.com','Shahin Alam','Admin',true,true,true]
+  ].filter(function(r){ return !have[normEmail_(r[0])]; });
+  if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, 6).setValues(add);
+}
+
+/* ================= ACCESS ================= */
+function getAccess_(email) {
+  const em = normEmail_(email);
+  const none = { authorized:false, email:em, name:'', role:'', salaryEdit:false, salaryView:false, orderCostView:false, configEdit:false, bankingView:false, status:false };
+  if (!em) return none;
+  const sh = audit_().getSheetByName(APP.ACCESS_SHEET);
+  if (!sh) throw new Error('Access Control sheet not found. Please run setupApp() first.');
+  if (sh.getLastRow() < 2) return none;
+  const rows = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+  for (let i = 0; i < rows.length; i++) {
+    if (normEmail_(rows[i][0]) !== em) continue;
+    const ok = toBool_(rows[i][5]), role = String(rows[i][2] || ''), roleKey = role.toLowerCase().trim(), admin = roleKey === 'admin';
+    const lead = roleKey === 'lead';
+    const sEdit = toBool_(rows[i][3]);
+    return { authorized: ok, email: em, name: String(rows[i][1] || ''), role: role,
+      salaryEdit: ok && sEdit && !lead, salaryView: ok && (sEdit || admin) && !lead,
+      orderCostView: ok && (lead || sEdit || admin),
+      configEdit: ok && toBool_(rows[i][4]) && !lead, bankingView: ok && admin, status: ok };
+  }
+  return none;
+}
+// Resolves a session token to the signed-in email (CacheService). Throws SESSION_EXPIRED when missing/expired.
+function session_(token) {
+  const t = String(token || '');
+  return t ? (CacheService.getScriptCache().get('sess_' + t) || '') : '';
+}
+function require_(token, perm) {
+  const em = session_(token);
+  if (!em) throw new Error('SESSION_EXPIRED: Your session has expired. Please sign in again.');
+  const a = getAccess_(em);
+  if (!a.authorized) throw new Error('Access denied. This email is not authorized.');
+  if (perm && !a[perm]) throw new Error('You do not have permission for this action.');
+  return a;
+}
+
+/* ================= LOGIN (Email Verification Code) ================= */
+const OTP = { TTL:600, MAX_TRIES:5, RESEND_WAIT:45, SESSION_TTL:21600 };   // seconds (21600 = 6 h, the CacheService maximum)
+const OTP_SALT = 'csor-tracker-v1';                                          // any private string
+
+// Run ONCE from the editor to grant the "send email" permission, then deploy a NEW VERSION.
+function authorizeMail() {
+  MailApp.sendEmail(Session.getEffectiveUser().getEmail(), 'Resource Tracker - mail authorization', 'Mail permission granted successfully.');
+}
+
+function otpHash_(email, code) {
+  const raw = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, normEmail_(email) + '|' + String(code) + '|' + OTP_SALT);
+  return Utilities.base64Encode(raw);
+}
+function otpEmailHtml_(code) {
+  const mins = OTP.TTL / 60;
+  return '<div style="background:#f3f6fb;padding:32px 12px;font-family:Segoe UI,Arial,sans-serif">'
+    + '<div style="max-width:460px;margin:0 auto;background:#ffffff;border:1px solid #e5e9f0;border-radius:14px;overflow:hidden">'
+    + '<div style="background:#0b1220;padding:20px 28px"><span style="color:#ffffff;font-size:16px;font-weight:700">Central Sort Ops Resource Tracker</span></div>'
+    + '<div style="padding:28px">'
+    + '<p style="margin:0 0 6px;font-size:16px;color:#0f172a;font-weight:600">Your verification code</p>'
+    + '<p style="margin:0 0 20px;font-size:14px;color:#475569;line-height:1.5">Use the code below to complete your sign-in. It is valid for ' + mins + ' minutes and can be used only once.</p>'
+    + '<div style="font-size:34px;font-weight:800;letter-spacing:10px;text-align:center;background:#eff6ff;color:#1d4ed8;padding:16px;border-radius:10px">' + code + '</div>'
+    + '<p style="margin:20px 0 0;font-size:12px;color:#64748b;line-height:1.5">If you did not request this code, you can safely ignore this email. Never share this code with anyone.</p>'
+    + '</div></div></div>';
+}
+
+// Step 1: send a one-time code to the user's email
+function sendLoginCode(email) {
+  const a = getAccess_(email);
+  if (!a.authorized) {
+    log_(email, 'LOGIN_DENIED', 'Unauthorized login attempt');
+    return { success:false, message:'Access denied. This email is not authorized.' };
+  }
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'otp_rl_' + a.email;
+  if (cache.get(rlKey)) return { success:false, message:'Please wait ' + OTP.RESEND_WAIT + ' seconds before requesting a new code.' };
+
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  cache.put('otp_' + a.email, JSON.stringify({ h:otpHash_(a.email, code), tries:0 }), OTP.TTL);
+  cache.put(rlKey, '1', OTP.RESEND_WAIT);
+
+  try {
+    MailApp.sendEmail({
+      to: a.email,
+      name: 'Central Sort Ops Resource Tracker',
+      subject: 'Your verification code: ' + code,
+      body: 'Your verification code is ' + code + '\nIt is valid for ' + (OTP.TTL / 60) + ' minutes. Do not share this code with anyone.',
+      htmlBody: otpEmailHtml_(code)
+    });
+  } catch (e) {
+    cache.remove('otp_' + a.email); cache.remove(rlKey);
+    log_(a.email, 'LOGIN_CODE_FAILED', e.message);
+    return { success:false, message:'Unable to send the verification email: ' + e.message };
+  }
+  log_(a.email, 'LOGIN_CODE_SENT', 'Verification code sent');
+  return { success:true, resendWait:OTP.RESEND_WAIT, message:'Verification code sent to ' + a.email };
+}
+
+// Step 2: verify the code and start a session
+function verifyLoginCode(email, code) {
+  const a = getAccess_(email);
+  if (!a.authorized) return { success:false, authorized:false, message:'Access denied. This email is not authorized.' };
+  code = String(code || '').replace(/\D/g, '');
+  if (code.length !== 6) return { success:false, message:'Please enter the 6-digit code.' };
+
+  const cache = CacheService.getScriptCache(), k = 'otp_' + a.email;
+  const raw = cache.get(k);
+  if (!raw) return { success:false, message:'Code expired or not requested. Please request a new code.' };
+  const rec = JSON.parse(raw);
+
+  if (rec.tries >= OTP.MAX_TRIES) {
+    cache.remove(k);
+    log_(a.email, 'LOGIN_CODE_LOCKED', 'Too many wrong attempts');
+    return { success:false, message:'Too many wrong attempts. Please request a new code.' };
+  }
+  if (rec.h !== otpHash_(a.email, code)) {
+    rec.tries++;
+    cache.put(k, JSON.stringify(rec), OTP.TTL);
+    log_(a.email, 'LOGIN_CODE_WRONG', 'Wrong code (' + rec.tries + '/' + OTP.MAX_TRIES + ')');
+    return { success:false, message:'Incorrect code. ' + (OTP.MAX_TRIES - rec.tries) + ' attempt(s) left.' };
+  }
+
+  cache.remove(k);                                   // one-time use
+  const token = Utilities.getUuid() + Utilities.getUuid();
+  cache.put('sess_' + token, a.email, OTP.SESSION_TTL);   // token -> email
+  log_(a.email, 'LOGIN', 'User logged in (verified)');
+  return { success:true, authorized:true, user:a, token:token, bootstrap:bootstrap_(a) };
+}
+
+function logout(token) {
+  const em = session_(token);
+  CacheService.getScriptCache().remove('sess_' + String(token || ''));
+  if (em) log_(em, 'LOGOUT', 'User logged out');
+  return { success:true };
+}
+function getBootstrap(token) {
+  const em = session_(token);
+  if (!em) return { authorized:false };
+  const a = getAccess_(em);
+  if (!a.authorized) return { authorized:false };
+  return { authorized:true, user:a, bootstrap:bootstrap_(a) };
+}
+function bootstrap_(a) {
+  const emps = readEmployees_(), cfgs = readConfigs_();
+  return {
+    dashboard: makeDashboard_(emps, cfgs, a, period_({}), emps, {}),
+    departments: uniq_(emps.map(function(e){return e.department;})),   // Data sheet column M
+    teams: uniq_(cfgs.map(function(c){return c.team;})),
+    offices: uniq_(emps.map(function(e){return e.office;})),
+    years: yearList_(emps)
+  };
+}
+
+/* ================= READ DATA ================= */
+function readEmployees_() {
+  if (_mem.emps) return _mem.emps;
+  const sh = dataSheet_(), last = sh.getLastRow();
+  if (last < 2) return (_mem.emps = []);
+  const vals = sh.getRange(2, 1, last - 1, Math.max(sh.getLastColumn(), DC.NAGAD)).getValues();
+  const t = function(r, k){ return normText_(r[DC[k] - 1]); };
+  const configs = readConfigs_(), out = [], salaryMap = readSalaryMap_();
+  vals.forEach(function(r, i) {
+    const id = t(r,'EMP_ID'), name = t(r,'EMP_NAME');
+    if (!id && !name) return;
+    const e = {
+      rowNumber: i + 2, office: t(r,'OFFICE') || t(r,'OFFICE2'), employeeId: id, name: name,
+      designation: t(r,'DESIGNATION'), doj: toDate_(r[DC.DOJ-1]), status: t(r,'STATUS'),
+      salary: DC.SALARY ? toNum_(r[DC.SALARY-1]) : 0, deactiveDate: toDate_(r[DC.DEACTIVE_DATE-1]),
+      deactiveReason: t(r,'DEACTIVE_REASON'), department: t(r,'HR_DEPARTMENT'),
+      hrDepartment: t(r,'DEPARTMENT'), division: t(r,'DIVISION'), manager: t(r,'MANAGER'),
+      email: normEmail_(r[DC.EMAIL-1]), officialMobile: t(r,'OFFICIAL_MOBILE'),
+      personalMobile: t(r,'PERSONAL_MOBILE'), contractDate: toDate_(r[DC.CONTRACT_DATE-1]),
+      proposedHub: t(r,'PROPOSED_HUB'), leadYM: plain_(r[DC.LEAD_YM-1]),
+      laptop: t(r,'LAPTOP'), serial: t(r,'SERIAL'), mouse: t(r,'MOUSE'), keyboard: t(r,'KEYBOARD'),
+      headphone: t(r,'HEADPHONE'), idCard: t(r,'ID_CARD'), vest: t(r,'VEST'),
+      accountName: t(r,'ACCOUNT_NAME'), bankAccount: t(r,'BANK_ACCOUNT'), bankName: t(r,'BANK_NAME'),
+      branchName: t(r,'BRANCH_NAME'), routingNo: t(r,'ROUTING_NO'), bkash: t(r,'BKASH'), nagad: t(r,'NAGAD')
+    };
+    // Current Salary must come from the Salary tab so Salary Analytics and
+    // Order & Cost Analytics always use the same salary source.
+    const salRec = salaryMap[key_(e.employeeId)];
+    if (salRec && salRec.salary != null) e.salary = Number(salRec.salary) || 0;
+    const m = resolveTeam_(e, configs);
+    e.team = m.team; e.zoneLead = m.zoneLead; e.process = m.process;
+    out.push(e);
+  });
+  // Current salary = 'Salary' tab (fallback: old Data-sheet column). History is used for past-period views.
+  const salMap = readSalaryMap_(), hist = readSalaryHistoryMap_();
+  out.forEach(function(e){
+    const k = key_(e.employeeId);
+    if (salMap[k]) e.salary = salMap[k].salary;
+    if (hist[k]) e.salaryHist = hist[k];
+  });
+  return (_mem.emps = out);
+}
+
+function readConfigs_() {
+  if (_mem.cfgs) return _mem.cfgs;
+  const sh = configSheet_(false);
+  if (!sh) return (_mem.cfgs = []);
+  const last = lastRowInCol_(sh, APP.CFG_COL);
+  if (last < 2) return (_mem.cfgs = []);
+  const vals = sh.getRange(2, APP.CFG_COL, last - 1, APP.CFG_WIDTH).getValues();
+  return (_mem.cfgs = vals.map(function(r, i) {
+    return { rowNumber:i+2, department:normText_(r[0]), team:normText_(r[1]), office:normText_(r[2]),
+      zoneLead:normText_(r[3]), manager:normText_(r[4]), process:normText_(r[5]),
+      ptnRate:toNum_(r[6]), bulkRate:toNum_(r[7]), bulkPct:pct_(r[8]),
+      shiftHours:toNum_(r[9]), breakHours:toNum_(r[10]), ectHours:toNum_(r[11]),
+      link1:url_(r[12]), link2:url_(r[13]), link3:url_(r[14]), link4:url_(r[15]) };
+  }).filter(function(c){ return c.department || c.team || c.office || c.manager || c.process; }));
+}
+
+function resolveTeam_(emp, configs) {
+  const none = { team:'Unassigned', zoneLead:'', process:'' };
+  const d = key_(emp.department), o = key_(emp.office), m = key_(emp.manager);
+  let best = null, bestScore = -1, tie = false;
+  configs.forEach(function(c) {
+    let s = 0;
+    if (key_(c.department)) { if (key_(c.department) !== d) return; s += 4; }
+    if (key_(c.office))     { if (key_(c.office) !== o) return; s += 3; }
+    if (key_(c.manager))    { if (key_(c.manager) !== m) return; s += 2; }
+    if (s > bestScore) { best = c; bestScore = s; tie = false; }
+    else if (s === bestScore && best && key_(best.team) !== key_(c.team)) tie = true;
+  });
+  if (!best || tie) return none;
+  return { team: best.team || 'Unassigned', zoneLead: best.zoneLead, process: best.process };
+}
+
+/* ================= DASHBOARD ================= */
+function getDashboardData(token, filters) {
+  const a = require_(token);
+  filters = filters || {};
+  const filtered = applyFilters_(readEmployees_(), filters), per = period_(filters);
+  const data = makeDashboard_(viewEmps_(filtered, per), readConfigs_(), a, per, filtered, filters);
+  log_(a.email, 'DASHBOARD_VIEW', JSON.stringify(filters));
+  return data;
+}
+const MONTHS_ = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+// Period filter: Year + Month. Empty = live (today).
+function period_(f) {
+  f = f || {};
+  const y = Number(f.year || 0), m = Number(f.month || 0), now = new Date();
+  if (!y && !m) return { live:true, year:now.getFullYear(), label:'This month (Live)' };
+  const yr = y || now.getFullYear();
+  return { live:false, year:yr,
+    start: m ? new Date(yr, m - 1, 1) : new Date(yr, 0, 1),
+    end:   m ? new Date(yr, m, 1)     : new Date(yr + 1, 0, 1),
+    label: m ? MONTHS_[m - 1] + ' ' + yr : 'Year ' + yr };
+}
+// Status "as of" the end of the selected period
+function viewEmps_(emps, per) {
+  if (per.live) return emps;
+  return emps.filter(function(e){ return !e.doj || e.doj < per.end; }).map(function(e){
+    const c = Object.assign({}, e);
+    c.status = (e.deactiveDate ? e.deactiveDate >= per.end : isActive_(e)) ? 'Active' : 'Inactive';
+    if (e.salaryHist) c.salary = salaryAsOf_(e.salaryHist, new Date(per.end.getTime() - 1), e.salary);
+    return c;
+  });
+}
+function desigBucket_(d) {
+  d = key_(d);
+  if (d.indexOf('zone lead') > -1) return 'zoneLead';
+  if (/senior associate|sr\.? associate/.test(d)) return 'seniorAssociate';
+  if (d.indexOf('associate') > -1) return 'associate';
+  if (d.indexOf('operator') > -1 || d.indexOf('sorter') > -1) return 'operator';
+  if (d.indexOf('executive') > -1) return 'executive';
+  return '';
+}
+function filtersForAttendance_(emps, f) {
+  f=f||{}; return { department:f.department||'', team:f.team||'', office:f.office||'', employees:emps||[] };
+}
+function attendanceDayOffSummary_(per, f) {
+  try {
+    const emps=(f&&f.employees)||[], ids={};
+    emps.forEach(function(e){ ids[key_(e.employeeId)]=1; });
+    const months=[];
+    if(per && per.live) months.push(cycleKey_(new Date()));
+    else if(per && per.start && per.end){
+      // Month-selected dashboard: use the matching payroll attendance cycle.
+      if(per.start.getMonth()===per.end.getMonth()-1 || per.start.getFullYear()!==per.end.getFullYear()) {
+        const d=new Date(per.start.getFullYear(),per.start.getMonth()+1,1); months.push(cycleKey_(new Date(d.getFullYear(),d.getMonth(),20)));
+      } else {
+        for(let m=0;m<12;m++) months.push(String(per.year)+'-'+pad2_(m+1));
+      }
+    }
+    let total=0;
+    months.forEach(function(mk){ ['Operator','Management'].forEach(function(g){
+      const t=readAtt_(mk,g); if(!t)return;
+      t.rows.forEach(function(r){ if(!ids[key_(r.id)])return; const z=attendanceRowCounts_(r,t); total+=z.offDay; });
+    }); });
+    return total;
+  } catch(e) { return 0; }
+}
+function makeDashboard_(emps, cfgs, a, per, all, filters) {
+  per = per || period_({}); all = all || emps;
+  const active = emps.filter(isActive_), inactive = emps.filter(function(e){ return !isActive_(e); });
+  const now = new Date(), sal = active.map(function(e){return e.salary;}).filter(function(v){return v > 0;});
+  const payroll = sal.reduce(function(x,y){return x+y;}, 0);
+  const inP = function(d){ if (!d) return false; return per.live ? sameMonth_(d, now) : (d >= per.start && d < per.end); };
+  const joined = all.filter(function(e){ return inP(e.doj); }).length;
+  const left = all.filter(function(e){ return inP(e.deactiveDate); }).length;
+  const des = { executive:0, seniorAssociate:0, associate:0, operator:0, zoneLead:0 };
+  active.forEach(function(e){ const b = desigBucket_(e.designation); if (b) des[b]++; });
+  const off = {};
+  active.forEach(function(e){ const k = e.office || 'Unassigned'; off[k] = (off[k] || 0) + 1; });
+  let expired = 0, soon = 0, missing = 0;
+  active.forEach(function(e){
+    if (e.contractDate) {
+      const d = Math.ceil((e.contractDate.getTime() - now.getTime()) / 86400000);
+      if (d < 0) expired++; else if (d <= 30) soon++;
+    }
+    if (!e.department || !e.manager || !e.doj || !e.salary) missing++;
+  });
+  return {
+    period: { label: per.label, live: per.live, year: per.year },
+    kpis: { total:emps.length, active:active.length, deactive:inactive.length, dayOff:attendanceDayOffSummary_(per, filtersForAttendance_(all, filters)),
+      joinThisMonth:joined, deactiveThisMonth:left,
+      attritionPct: active.length ? left / active.length * 100 : 0,
+      payroll: a.salaryView ? payroll : null,
+      averageSalary: a.salaryView ? (sal.length ? payroll / sal.length : 0) : null },
+    alerts: { contractExpired:expired, contractSoon:soon, missingData:missing },
+    byOffice: Object.keys(off).map(function(k){ return { office:k, count:off[k] }; }).sort(function(x,y){ return y.count - x.count; }),
+    designation: des,
+    workforce: workforce_(emps),
+    capacity: capacity_(emps, cfgs),
+    joiningTrend: trend_(all, 'doj', per.year),
+    deactivationTrend: trend_(all, 'deactiveDate', per.year)
+  };
+}
+function workforce_(emps) {
+  const map = {};
+  emps.forEach(function(e) {
+    const k = e.department || 'Unassigned';
+    const x = map[k] || (map[k] = { department:k, total:0, executive:0, seniorAssociate:0, associate:0, operator:0, active:0, deactive:0, dayOff:0 });
+    x.total++; isActive_(e) ? x.active++ : x.deactive++;
+    const b = desigBucket_(e.designation); if (b && b !== 'zoneLead') x[b]++;
+  });
+  return Object.keys(map).sort().map(function(k){ return map[k]; });
+}
+function cfgKey_(c) { return [key_(c.department), key_(c.team), key_(c.office), key_(c.manager)].join('|'); }
+function capacity_(emps, cfgs) {
+  const groups = {};
+  cfgs.forEach(function(c) {
+    const k = cfgKey_(c);
+    const g = groups[k] || (groups[k] = { department:c.department||'Unassigned', team:c.team||'Unassigned', office:c.office,
+      zoneLead:c.zoneLead, manager:c.manager, process:c.process, op:0, ptnRate:0, bulkRate:0, bulkPct:0,
+      shiftHours:0, breakHours:0, ectHours:0, links:[c.link1,c.link2,c.link3,c.link4].filter(Boolean) });
+    ['ptnRate','bulkRate','bulkPct','shiftHours','breakHours','ectHours'].forEach(function(f){ g[f] = c[f] || g[f]; });
+  });
+  emps.forEach(function(e) {
+    if (!isActive_(e) || !isOperator_(e)) return;
+    const c = findCfg_(e, cfgs);
+    if (c && groups[cfgKey_(c)]) groups[cfgKey_(c)].op++;
+  });
+  return Object.keys(groups).map(function(k) {
+    const g = groups[k], avail = g.op, ptnPct = Math.max(0, 1 - g.bulkPct);
+    const ptn = avail * g.ptnRate * ptnPct, bulk = avail * g.bulkRate * g.bulkPct, hourly = ptn + bulk;
+    const normal = hourly * Math.max(0, g.shiftHours - g.breakHours), ect = hourly * g.ectHours;
+    return { department:g.department, team:g.team, office:g.office, zoneLead:g.zoneLead, manager:g.manager, process:g.process,
+      sorterOperator:g.op, dayOff:0, available:avail, ptnRate:g.ptnRate, bulkRate:g.bulkRate, bulkPct:g.bulkPct,
+      currentPTN:ptn, currentBulk:bulk, processHourly:hourly, shiftHours:g.shiftHours, breakHours:g.breakHours,
+      ectHours:g.ectHours, normalCapacity:normal, ectCapacity:ect, maximumCapacity:normal + ect,
+      currentOrder:null, configComplete:g.ptnRate > 0 && g.bulkRate > 0 && g.shiftHours > 0, links:g.links };
+  }).sort(function(x, y){ return String(x.team).localeCompare(String(y.team)); });
+}
+function findCfg_(emp, cfgs) {
+  const m = resolveTeam_(emp, cfgs);
+  if (m.team === 'Unassigned') return null;
+  const c = cfgs.filter(function(x){ return key_(x.team) === key_(m.team); });
+  if (!c.length) return null;
+  return c.filter(function(x){
+    return key_(x.department) === key_(emp.department) && key_(x.office) === key_(emp.office) && key_(x.manager) === key_(emp.manager);
+  })[0] || c[0];
+}
+function applyFilters_(emps, f) {
+  const chk = function(want, have){ want = key_(want); return !want || want === 'all' || want === key_(have); };
+  return emps.filter(function(e){
+    return chk(f.department, e.department) && chk(f.team, e.team) && chk(f.office, e.office) && chk(f.status, e.status);
+  });
+}
+function trend_(emps, field, year) {
+  const y = year || new Date().getFullYear(), out = [];
+  for (let m = 0; m < 12; m++) {
+    const s = new Date(y, m, 1), n = new Date(y, m + 1, 1);
+    out.push({ month: Utilities.formatDate(s, tz_(), 'MMM'),
+      count: emps.filter(function(e){ return e[field] && e[field] >= s && e[field] < n; }).length });
+  }
+  return out;
+}
+
+/* ================= RESOURCES / PROFILE ================= */
+function getResources(token, filters) {
+  const a = require_(token);
+  filters = filters || {};
+  let rows = applyFilters_(readEmployees_(), filters);
+  const q = key_(filters.search);
+  if (q) rows = rows.filter(function(e){
+    return [e.employeeId, e.name, e.email, e.officialMobile, e.department, e.team, e.office]
+      .some(function(v){ return key_(v).indexOf(q) > -1; });
+  });
+  log_(a.email, 'RESOURCE_SEARCH', q || 'Resource list');
+  return rows.map(function(e){
+    return { employeeId:e.employeeId, name:e.name, designation:e.designation, department:e.department,
+      team:e.team, office:e.office, joiningDate:iso_(e.doj), status:e.status, salary:a.salaryView ? e.salary : null };
+  });
+}
+function getEmployeeProfile(token, employeeId) {
+  const a = require_(token), id = normText_(employeeId);
+  if (!id) throw new Error('Employee ID is required.');
+  const m = readEmployees_().filter(function(e){ return key_(e.employeeId) === key_(id); });
+  if (!m.length) throw new Error('Employee not found: ' + id);
+  if (m.length > 1) throw new Error('Duplicate Employee ID found: ' + id);
+  const e = m[0];
+  const p = { employeeId:e.employeeId, name:e.name, designation:e.designation, department:e.department,
+    hrDepartment:e.hrDepartment, division:e.division, team:e.team, zoneLead:e.zoneLead, process:e.process,
+    office:e.office, proposedHub:e.proposedHub, joiningDate:iso_(e.doj), leadYM:e.leadYM, status:e.status,
+    lineManager:e.manager, contractDate:iso_(e.contractDate), deactiveDate:iso_(e.deactiveDate),
+    deactiveReason:e.deactiveReason, officialEmail:e.email, officialMobile:e.officialMobile,
+    personalMobile:e.personalMobile,
+    assets:{ laptop:e.laptop, serial:e.serial, mouse:e.mouse, keyboard:e.keyboard, headphone:e.headphone, idCard:e.idCard, vest:e.vest } };
+  if (a.salaryView) p.salary = e.salary;
+  if (a.bankingView) p.banking = { accountName:e.accountName, bankAccount:e.bankAccount, bankName:e.bankName,
+    branchName:e.branchName, routingNo:e.routingNo, bkash:e.bkash, nagad:e.nagad };
+  log_(a.email, 'PROFILE_VIEW', 'Employee ID: ' + e.employeeId);
+  return p;
+}
+
+
+/* ================= FULL EXPORT ================= */
+function getFullExport(token, filters) {
+  const a = require_(token);
+  filters = filters || {};
+  const per = period_(filters);
+  let rows = viewEmps_(applyFilters_(readEmployees_(), filters), per);
+  const q = key_(filters.search);
+  if (q) rows = rows.filter(function(e){
+    return [e.employeeId, e.name, e.email, e.officialMobile, e.department, e.team, e.office]
+      .some(function(v){ return key_(v).indexOf(q) > -1; });
+  });
+  const cols = [
+    ['Employee ID', function(e){return e.employeeId;}], ['Employee Name', function(e){return e.name;}],
+    ['Designation', function(e){return e.designation;}], ['Department (M)', function(e){return e.department;}],
+    ['Department (L)', function(e){return e.hrDepartment;}], ['Division', function(e){return e.division;}],
+    ['Team', function(e){return e.team;}], ['Zone Lead', function(e){return e.zoneLead;}],
+    ['Process', function(e){return e.process;}], ['Office', function(e){return e.office;}],
+    ['Proposed Hub', function(e){return e.proposedHub;}], ['Line Manager', function(e){return e.manager;}],
+    ['Joining Date', function(e){return iso_(e.doj);}], ['Lead Time', function(e){return e.leadYM;}],
+    ['Status', function(e){return e.status;}], ['Contract Date', function(e){return iso_(e.contractDate);}],
+    ['Deactive Date', function(e){return iso_(e.deactiveDate);}], ['Deactive Reason', function(e){return e.deactiveReason;}],
+    ['Official Email', function(e){return e.email;}], ['Official Mobile', function(e){return e.officialMobile;}],
+    ['Personal Mobile', function(e){return e.personalMobile;}], ['Laptop Tracking', function(e){return e.laptop;}],
+    ['Serial', function(e){return e.serial;}], ['Mouse', function(e){return e.mouse;}],
+    ['Keyboard', function(e){return e.keyboard;}], ['Headphone', function(e){return e.headphone;}],
+    ['ID Card', function(e){return e.idCard;}], ['Vest', function(e){return e.vest;}]
+  ];
+  if (a.salaryView) cols.push(['Salary', function(e){return e.salary;}]);
+  if (a.bankingView) cols.push(
+    ['Account Name', function(e){return e.accountName;}], ['Bank Account', function(e){return e.bankAccount;}],
+    ['Bank Name', function(e){return e.bankName;}], ['Branch Name', function(e){return e.branchName;}],
+    ['Routing No', function(e){return e.routingNo;}], ['bKash', function(e){return e.bkash;}], ['Nagad', function(e){return e.nagad;}]);
+  log_(a.email, 'FULL_EXPORT', rows.length + ' rows | ' + JSON.stringify(filters));
+  return { headers: cols.map(function(c){return c[0];}),
+           rows: rows.map(function(e){ return cols.map(function(c){ const v = c[1](e); return v === null || v === undefined ? '' : v; }); }) };
+}
+
+/* ================= SALARY ================= */
+function updateSalary(token, p) {
+  const a = require_(token, 'salaryEdit');
+  if (!p) throw new Error('Salary update data missing.');
+  const id = normText_(p.employeeId), ns = toNum_(p.newSalary), eff = toDate_(p.effectiveDate), reason = normText_(p.reason);
+  if (!id) throw new Error('Employee ID is required.');
+  if (!ns || ns < 0) throw new Error('Valid new salary is required.');
+  if (!eff) throw new Error('Effective Date is required.');
+  if (!reason) throw new Error('Reason is required.');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const m = readEmployees_().filter(function(e){ return key_(e.employeeId) === key_(id); });
+    if (!m.length) throw new Error('Employee ID not found: ' + id);
+    if (m.length > 1) throw new Error('Duplicate Employee ID. Salary update stopped for safety.');
+    const name = m[0].name, old = m[0].salary;
+    const tab = auditSheet_(APP.SALARY_TAB, SAL_HEADERS), cur = readSalaryMap_()[key_(id)];
+    const vals = [id, name, ns, new Date(), a.email];
+    if (cur) tab.getRange(cur.row, 1, 1, 5).setValues([vals]); else tab.appendRow(vals);
+    auditSheet_(APP.SALARY_SHEET, ['Timestamp','Employee ID','Employee Name','Old Salary','New Salary','Effective Date','Reason','Updated By'])
+      .appendRow([new Date(), id, name, old, ns, eff, reason, a.email]);
+    log_(a.email, 'SALARY_UPDATE', JSON.stringify({ employeeId:id, employeeName:name, oldSalary:old, newSalary:ns, effectiveDate:iso_(eff), reason:reason }));
+    return { success:true, employeeId:id, employeeName:name, oldSalary:old, newSalary:ns };
+  } finally { lock.releaseLock(); }
+}
+function getSalaryHistory(token) {
+  require_(token, 'salaryView');
+  const sh = audit_().getSheetByName(APP.SALARY_SHEET);
+  if (!sh || sh.getLastRow() < 2) return [];
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 8).getValues().map(function(r){
+    return { timestamp:dt_(r[0]), employeeId:String(r[1]||''), employeeName:String(r[2]||''),
+      oldSalary:toNum_(r[3]), newSalary:toNum_(r[4]), effectiveDate:iso_(toDate_(r[5])),
+      reason:String(r[6]||''), updatedBy:String(r[7]||'') };
+  }).reverse();
+}
+
+/* ================= TURNOVER ================= */
+function getTurnover(token, f) {
+  const a = require_(token);
+  f = f || {};
+  const year = Number(f.year || new Date().getFullYear()), month = Number(f.month || 0);
+  const base = applyFilters_(readEmployees_(), { department:f.department });
+  const emps = applyFilters_(base, { team:f.team });
+  const calc = function(list, s, n) {
+    const opening = list.filter(function(e){ return e.doj && e.doj < s && !(e.deactiveDate && e.deactiveDate < s); }).length;
+    const join = list.filter(function(e){ return e.doj && e.doj >= s && e.doj < n; }).length;
+    const resigned = list.filter(function(e){ return e.deactiveDate && e.deactiveDate >= s && e.deactiveDate < n; }).length;
+    const closing = opening + join - resigned, avg = (opening + closing) / 2;
+    return { opening:opening, join:join, resigned:resigned, active:closing, turnover: avg > 0 ? resigned / avg * 100 : 0 };
+  };
+  const rows = [];
+  for (let m = 0; m < 12; m++) {
+    const s = new Date(year, m, 1), n = new Date(year, m + 1, 1);
+    rows.push(Object.assign({ idx:m + 1, month:Utilities.formatDate(s, tz_(), 'MMM') }, calc(emps, s, n)));
+  }
+  const ps = month ? new Date(year, month - 1, 1) : new Date(year, 0, 1);
+  const pn = month ? new Date(year, month, 1) : new Date(year + 1, 0, 1);
+  const byTeam = {};
+  // Team-wise breakdown must use Data sheet column L (Department), exposed as hrDepartment.
+  base.forEach(function(e){ const k = e.hrDepartment || 'Unassigned'; (byTeam[k] = byTeam[k] || []).push(e); });
+  const teams = Object.keys(byTeam).sort().map(function(k){ return Object.assign({ team:k }, calc(byTeam[k], ps, pn)); })
+    .filter(function(t){ return t.opening || t.join || t.resigned; });
+  log_(a.email, 'TURNOVER_VIEW', JSON.stringify(f));
+  return { year:year, month:month, periodLabel: month ? MONTHS_[month - 1] + ' ' + year : 'Year ' + year, rows:rows, teams:teams, teamBreakdownSource:'Data sheet L:L (Department)' };
+}
+
+/* ================= FORECAST ================= */
+function matchSel_(want, have) { const w = key_(want); return !w || w === 'all' || w === key_(have); }
+function getForecastDefaults(token, filters) {
+  const a = require_(token);
+  filters = filters || {};
+  const scope = readEmployees_().filter(function(e){ return matchSel_(filters.department, e.department) && matchSel_(filters.team, e.team); });
+  const cfgs = readConfigs_().filter(function(c){ return matchSel_(filters.department, c.department) && matchSel_(filters.team, c.team); });
+  const active = scope.filter(isActive_), ops = active.filter(isOperator_);
+  const heads = ops.length ? ops : active, basis = ops.length ? 'operator' : 'all';
+  const avg = function(f){ return average_(cfgs.map(function(c){return c[f];}).filter(function(v){return v > 0;})); };
+  const ptn = avg('ptnRate'), bulk = avg('bulkRate'), bp = avg('bulkPct');
+  const method = (ptn > 0 && bulk > 0 && bp > 0) ? 'ptnbulk' : 'single';
+  const ids = {}; heads.forEach(function(e){ ids[key_(e.employeeId)] = 1; });
+  const off = attDayOff_(ids);
+  log_(a.email, 'FORECAST_OPEN', JSON.stringify(filters));
+  return { method:method, basis:basis, activeOperators:heads.length, dayOff: off === null ? 0 : off,
+    dayOffSource: off === null ? 'manual' : 'attendance', configCount:cfgs.length,
+    ptnRate: method === 'single' ? (ptn || bulk) : ptn, bulkRate:bulk, bulkPct:bp,
+    shiftHours:avg('shiftHours'), breakHours:avg('breakHours'), ectHours:avg('ectHours'), safetyBuffer:0 };
+}
+function calculateForecast(token, p) {
+  const a = require_(token);
+  p = p || {};
+  const single = p.method === 'single';
+  const orders = toNum_(p.totalOrders), hours = toNum_(p.workingHours);
+  let ptnPct = pct_(p.ptnPct), bulkPct = pct_(p.bulkPct), ptnRate = toNum_(p.ptnRate), bulkRate = toNum_(p.bulkRate);
+  const ops = toNum_(p.activeOperators), off = toNum_(p.dayOff), ect = toNum_(p.ectHours), buf = toNum_(p.safetyBuffer);
+  if (single) { ptnPct = 1; bulkPct = 0; bulkRate = ptnRate; }
+  if (orders <= 0) throw new Error('Total Orders must be greater than 0.');
+  if (hours <= 0) throw new Error('Working Hours must be greater than 0.');
+  if (single && ptnRate <= 0) throw new Error('Orders / Resource / Hour must be greater than 0.');
+  if (!single && (ptnRate <= 0 || bulkRate <= 0)) throw new Error('PTN and BULK capacity/operator/hour must be greater than 0.');
+  if (!single && Math.abs(ptnPct + bulkPct - 1) > 0.01) throw new Error('PTN % + BULK % must be equal to 100.');
+  const hourly = orders / hours, ptnH = hourly * ptnPct, bulkH = hourly * bulkPct;
+  const reqPtn = Math.ceil(ptnH / ptnRate), reqBulk = Math.ceil(bulkH / bulkRate), req = reqPtn + reqBulk;
+  const avail = Math.max(0, ops - off), perHour = avail * (ptnRate * ptnPct + bulkRate * bulkPct);
+  const normal = perHour * hours, ectCap = perHour * ect, max = normal + ectCap;
+  let status = 'Normal Capacity Sufficient';
+  if (normal < orders) status = max >= orders ? 'ECT Required' : 'Manpower / Capacity Shortage';
+  log_(a.email, 'FORECAST_RUN', JSON.stringify(p));
+  return { method:single ? 'single' : 'ptnbulk', totalOrders:orders, hourlyRequirement:hourly, ptnHourly:ptnH, bulkHourly:bulkH,
+    requiredPTNOperators:reqPtn, requiredBulkOperators:reqBulk, requiredManpower:req, activeOperators:ops, dayOff:off,
+    available:avail, manpowerGap:req - avail, additionalResource:Math.max(0, req + buf - avail), normalCapacity:normal,
+    ectCapacity:ectCap, maximumCapacity:max, utilization: normal > 0 ? orders / normal * 100 : 0, status:status };
+}
+
+/* ================= REPORTS ================= */
+function getReports(token, filters) {
+  const a = require_(token);
+  const emps = applyFilters_(readEmployees_(), filters || {}), active = emps.filter(isActive_), now = new Date();
+  // salary
+  let salary = { allowed:false };
+  if (a.salaryView) {
+    const sal = active.map(function(e){return e.salary;}).filter(function(v){return v > 0;}), byD = {};
+    active.forEach(function(e){
+      const k = e.department || 'Unassigned', x = byD[k] || (byD[k] = { department:k, headcount:0, payroll:0, average:0 });
+      x.headcount++; x.payroll += e.salary || 0;
+    });
+    salary = { allowed:true, activePayroll:sal.reduce(function(x,y){return x+y;},0), average:average_(sal),
+      min:sal.length ? Math.min.apply(null, sal) : 0, max:sal.length ? Math.max.apply(null, sal) : 0,
+      byDepartment:Object.keys(byD).map(function(k){ const x = byD[k]; x.average = x.headcount ? x.payroll / x.headcount : 0; return x; })
+        .sort(function(x, y){ return y.payroll - x.payroll; }) };
+  }
+  // aging
+  const aging = { '<3m':0, '3-6m':0, '6-12m':0, '1-2y':0, '2y+':0 };
+  active.forEach(function(e){
+    if (!e.doj) return;
+    const m = monthDiff_(e.doj, now);
+    aging[m < 3 ? '<3m' : m < 6 ? '3-6m' : m < 12 ? '6-12m' : m < 24 ? '1-2y' : '2y+']++;
+  });
+  // contract
+  const contract = { expired:0, within7:0, within30:0, within60:0, within90:0 };
+  active.forEach(function(e){
+    if (!e.contractDate) return;
+    const d = Math.ceil((e.contractDate.getTime() - now.getTime()) / 86400000);
+    if (d < 0) contract.expired++; else if (d <= 7) contract.within7++; else if (d <= 30) contract.within30++;
+    else if (d <= 60) contract.within60++; else if (d <= 90) contract.within90++;
+  });
+  // office / manager
+  const off = {}, mgr = {};
+  emps.forEach(function(e){
+    const k = e.office || 'Unassigned', x = off[k] || (off[k] = { office:k, total:0, active:0, deactive:0 });
+    x.total++; isActive_(e) ? x.active++ : x.deactive++;
+  });
+  active.forEach(function(e){ const k = e.manager || 'Unassigned'; mgr[k] = (mgr[k] || 0) + 1; });
+  // data quality
+  const ids = {};
+  emps.forEach(function(e){ const k = key_(e.employeeId); if (k) ids[k] = (ids[k] || 0) + 1; });
+  let dup = 0; Object.keys(ids).forEach(function(k){ if (ids[k] > 1) dup += ids[k]; });
+  const valid = emps.filter(function(e){
+    return [e.employeeId, e.name, e.designation, e.department, e.doj, e.salary, e.manager].every(function(v){ return v && v !== 0; });
+  }).length;
+  const filled = function(f){ return active.filter(function(e){ return normText_(e[f]) !== ''; }).length; };
+  log_(a.email, 'REPORTS_VIEW', JSON.stringify(filters || {}));
+  return { salary:salary, aging:aging, contract:contract,
+    office:Object.keys(off).map(function(k){return off[k];}).sort(function(x,y){return y.total - x.total;}),
+    manager:Object.keys(mgr).map(function(k){ return { manager:k, active:mgr[k] }; }).sort(function(x,y){return y.active - x.active;}),
+    dataQuality:{ total:emps.length, valid:valid, incomplete:emps.length - valid, duplicateEmployeeId:dup,
+      health: emps.length ? valid / emps.length * 100 : 100 },
+    assets:{ laptop:filled('laptop'), serial:filled('serial'), mouse:filled('mouse'), keyboard:filled('keyboard'),
+      headphone:filled('headphone'), idCard:filled('idCard'), vest:filled('vest') } };
+}
+
+
+/* ================= ORDER & COST ANALYTICS ================= */
+/*
+ * Order Qty source is the existing "MOM Order" sheet.
+ * Structure: Row 1 = month headers (May-26, Jun-26, ...),
+ * Row 2 = "Order Qty", Column A = Department.
+ * No separate/manual Order Qty sheet is created or used.
+ */
+function momOrderSheet_(){
+  const ss = main_();
+  // Use the exact tab GID supplied by the user first. This is important because
+  // the tab name in the shared workbook is not necessarily 'MOM Order'.
+  let sh = ss.getSheets().filter(function(s){ return s.getSheetId() === APP.MOM_ORDER_GID; })[0];
+  if (sh) return sh;
+  // Fallback for older setup where the tab is named 'MOM Order'.
+  return ss.getSheets().filter(function(s){ return nameKey_(s.getName()) === nameKey_(APP.MOM_ORDER_SHEET); })[0] || null;
+}
+function monthKeyFromLabel_(v){
+  const s = normText_(v).replace(/\s+/g,' ');
+  if (!s) return '';
+  let m = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[- ](\d{2,4})$/i.exec(s);
+  if (!m) return '';
+  const mi = MON3_.indexOf(m[1].slice(0,3).toLowerCase());
+  let y = Number(m[2]); if (y < 100) y += 2000;
+  return mi >= 0 ? y + '-' + pad2_(mi + 1) : '';
+}
+function readMomOrder_(){
+  if (_mem.momOrder) return _mem.momOrder;
+  const sh = momOrderSheet_();
+  if (!sh || sh.getLastRow() < 2 || sh.getLastColumn() < 2) return (_mem.momOrder = { months:[], rows:[], map:{}, sheet:sh ? sh.getName() : APP.MOM_ORDER_SHEET });
+
+  // Flexible MOM Order parser. It supports both:
+  // 1) Row with "Department" + month headers on the same row, and
+  // 2) Month headers on a separate row, with Department on another row.
+  // It also ignores helper rows such as "Order Qty".
+  const v = sh.getDataRange().getDisplayValues();
+  const maxScan = Math.min(12, v.length);
+  const deptAliases = ['department','dept'];
+  let deptRow = -1, monthHeaderRow = -1, bestMonthCount = 0;
+
+  for (let r = 0; r < maxScan; r++) {
+    const first = key_(v[r][0]);
+    if (deptRow < 0 && deptAliases.indexOf(first) > -1) deptRow = r;
+    let cnt = 0;
+    for (let c = 1; c < v[r].length; c++) if (monthKeyFromLabel_(v[r][c])) cnt++;
+    if (cnt > bestMonthCount) { bestMonthCount = cnt; monthHeaderRow = r; }
+  }
+  if (deptRow < 0) throw new Error('Department header not found in the MOM Order sheet.');
+  if (monthHeaderRow < 0 || bestMonthCount === 0) throw new Error('Month headers (e.g. May-26, Jun-26) not found in the MOM Order sheet.');
+
+  const months = [];
+  for (let c = 1; c < v[monthHeaderRow].length; c++) {
+    const mk = monthKeyFromLabel_(v[monthHeaderRow][c]);
+    if (!mk) continue;
+    months.push({ col:c, key:mk, label:normText_(v[monthHeaderRow][c]), type:'order qty' });
+  }
+
+  // Data starts after both the Department header and month header rows.
+  // Rows whose first cell is Order Qty / Total / blank are ignored.
+  const dataStart = Math.max(deptRow, monthHeaderRow) + 1;
+  const rows = [], map = {}, totalMap = {};
+
+  for (let r = dataStart; r < v.length; r++) {
+    const dept = normText_(v[r][0]);
+    const dk = key_(dept);
+    if (!dept) continue;
+    const hasNumber = months.some(function(m){ return normText_(v[r][m.col]) !== ''; });
+    if (!hasNumber) continue;
+
+    // If the source sheet has an explicit Total Order row in column A,
+    // keep that value separately. This value is used ONLY for the Total Order card.
+    const totalLabel = key_(dept).replace(/\s+/g,' ');
+    if (/^(total order|total orders|grand total order|grand total)$/.test(totalLabel)) {
+      months.forEach(function(m){ totalMap[m.key] = toNum_(v[r][m.col]); });
+      continue;
+    }
+    if (/^(order\s*qty|total|department|dept)$/.test(totalLabel)) continue;
+
+    const row = { department:dept, values:{} };
+    months.forEach(function(m){
+      row.values[m.key] = toNum_(v[r][m.col]);
+      map[m.key+'|'+dk] = row.values[m.key] || 0;
+    });
+    rows.push(row);
+  }
+  const uniqMonths = months.filter(function(m,i,a){ return a.findIndex(function(x){return x.key===m.key;})===i; }).sort(function(a,b){return a.key.localeCompare(b.key);});
+  return (_mem.momOrder = { months:uniqMonths, rows:rows, map:map, totalMap:totalMap, sheet:sh.getName(), deptRow:deptRow+1, monthHeaderRow:monthHeaderRow+1 });
+}
+
+function getOrderCostMeta(token){
+  require_(token, 'orderCostView');
+  const d = readMomOrder_();
+  const years = uniq_(d.months.map(function(x){return x.key.slice(0,4);})).sort().reverse().map(Number);
+  return { sheet:APP.MOM_ORDER_SHEET, months:d.months.map(function(x){return {key:x.key,label:x.label};}), years:years,
+    departments:uniq_(d.rows.map(function(x){return x.department;})) };
+}
+function attendanceDepartmentStats_(monthKey, department){
+  const parts=String(monthKey || '').split('-'), year=Number(parts[0]), month=Number(parts[1]);
+  if (!year || !month) return {resourceCount:0,presentDays:0,dayOff:0,weekend:0,leave:0,absent:0,holiday:0};
+  const empMap={}; readEmployees_().forEach(function(e){ empMap[key_(e.employeeId)]=e; });
+  const want=key_(department), seen={}, out={resourceCount:0,presentDays:0,dayOff:0,weekend:0,leave:0,absent:0,holiday:0};
+  ['Operator','Management'].forEach(function(g){
+    const t=readAtt_(monthKey,g); if(!t) return;
+    t.rows.forEach(function(r){
+      const e=empMap[key_(r.id)], dept=(e?e.department:r.department)||'Unassigned', deptL=e?e.hrDepartment:'';
+      if(want && want!=='all' && key_(dept)!==want && key_(deptL)!==want) return;
+      const id=key_(r.id); if(!id || seen[id]) return; seen[id]=1; out.resourceCount++;
+      for(let i=0;i<t.dates.length;i++){
+        const raw=String(r.codes[i]||'').trim().toLowerCase(), cl=String(r.classes[i]||'').toUpperCase();
+        const wk=isWeekend_(r.weekend,t.dates[i].dow), code=cl || (raw ? classify_(raw) : '');
+        if(code==='P'){ out.presentDays++; if(wk) out.weekend++; continue; }
+        if(code==='A'){ out.absent++; continue; }
+        if(code==='L'){ out.leave++; continue; }
+        if(code==='H'){ out.holiday++; continue; }
+        if(code==='OFF' || wk){ out.dayOff++; continue; }
+      }
+    });
+  });
+  return out;
+}
+function activeAt_(e, date){
+  if (!e || !date) return false;
+  const d=e.doj instanceof Date ? e.doj : toDate_(e.doj), x=e.deactiveDate instanceof Date ? e.deactiveDate : toDate_(e.deactiveDate);
+  if(!d || d>date) return false;
+  if(x && x<=date) return false;
+  return true;
+}
+function monthBounds_(monthKey){
+  const p=String(monthKey||'').split('-'), y=Number(p[0]), m=Number(p[1]);
+  if(!y || !m) return null;
+  return {start:new Date(y,m-1,1),end:new Date(y,m,0,23,59,59,999)};
+}
+function employeeSalaryAsOf_(e,date,salaryMap){
+  const hist=e&&e.salaryHist?e.salaryHist:[];
+  const rec=salaryMap&&salaryMap[key_(e.employeeId)], fallback=rec?Number(rec.salary)||0:Number(e.salary)||0;
+  if(!hist.length) return fallback;
+  let cur=null; hist.forEach(function(h){if(h&&h.eff&&h.eff<=date)cur=h;});
+  return cur ? Number(cur.sal)||0 : (hist[0]&&hist[0].old>0 ? Number(hist[0].old)||0 : fallback);
+}
+function monthResourceSalaryStats_(monthKey){
+  const b=monthBounds_(monthKey); if(!b)return {activeResources:0,deactiveResources:0,activePayroll:0,deactivePayroll:0,totalResources:0,totalPayroll:0};
+  const emps=readEmployees_(), salaryMap=readSalaryMap_();
+  let activeResources=0,deactiveResources=0,activePayroll=0,deactivePayroll=0;
+  emps.forEach(function(e){
+    const sal=employeeSalaryAsOf_(e,b.end,salaryMap);
+    if(activeAt_(e,b.end)){activeResources++;activePayroll+=sal;}
+    const dd=e.deactiveDate?toDate_(e.deactiveDate):null;
+    if(dd&&dd>=b.start&&dd<=b.end){deactiveResources++;deactivePayroll+=sal;}
+  });
+  return {activeResources:activeResources,deactiveResources:deactiveResources,activePayroll:activePayroll,deactivePayroll:deactivePayroll,totalResources:activeResources+deactiveResources,totalPayroll:activePayroll+deactivePayroll};
+}
+function salaryForMonthDepartment_(year,month,department){
+  const b=monthBounds_(String(year)+'-'+pad2_(month)); if(!b)return 0;
+  const want=key_(department), salaryMap=readSalaryMap_();
+  return readEmployees_().filter(function(e){return activeAt_(e,b.end)&&(!want||want==='all'||key_(e.department)===want||key_(e.hrDepartment)===want);})
+    .reduce(function(sum,e){return sum+employeeSalaryAsOf_(e,b.end,salaryMap);},0);
+}
+function getOrderCostAnalytics(token,f){
+  require_(token,'orderCostView'); f=f||{};
+  const data=readMomOrder_(), requested=normText_(f.month), requestedYear=String(f.year||'');
+  let available=data.months.slice(); if(requestedYear)available=available.filter(function(x){return x.key.slice(0,4)===requestedYear;});
+  if(!available.length)available=data.months.slice();
+  if(!available.length)return {found:false,message:'No month/order data found in the MOM Order sheet.',months:[],years:[],departments:[],selected:[]};
+  const monthKey=requested&&data.months.some(function(x){return x.key===requested;})?requested:available[available.length-1].key;
+  const parts=monthKey.split('-'), year=Number(parts[0]), month=Number(parts[1]), deptFilter=normText_(f.department);
+  let departments=uniq_((data.rows||[]).map(function(x){return x.department;}));
+  if(deptFilter&&key_(deptFilter)!=='all')departments=departments.filter(function(d){return key_(d)===key_(deptFilter);});
+  const totalOrders=orderTotalForMonth_(data,monthKey);
+  const selected=departments.map(function(d){
+    const att=attendanceDepartmentStats_(monthKey,d), payroll=salaryForMonthDepartment_(year,month,d), orderQty=Number(data.map[monthKey+'|'+key_(d)]||0);
+    return {month:monthKey,department:d,orderQty:orderQty,payroll:payroll,resourceCount:att.resourceCount,presentDays:att.presentDays,ppCost:totalOrders?payroll/totalOrders:0};
+  });
+  const totalPayroll=selected.reduce(function(s,x){return s+x.payroll;},0), rs=monthResourceSalaryStats_(monthKey);
+  const explicitTotal=Number(data.totalMap&&data.totalMap[monthKey]||0);
+  const cardOrder=explicitTotal||totalOrders;
+  return {found:true,year:year,month:month,monthKey:monthKey,monthLabel:((data.months.filter(function(x){return x.key===monthKey;})[0])||{}).label||monthKey,
+    departments:departments,selected:selected,totals:{payroll:totalPayroll,orderQty:cardOrder,ppCost:cardOrder?totalPayroll/cardOrder:0,resourceCount:rs.activeResources},resourceStats:rs,
+    meta:{months:data.months.map(function(x){return {key:x.key,label:x.label};}),years:uniq_(data.months.map(function(x){return x.key.slice(0,4);})).sort().reverse().map(Number),departments:uniq_(data.rows.map(function(x){return x.department;})),sheet:APP.MOM_ORDER_SHEET},canEdit:false,isLead:false};
+}
+
+function orderTotalForMonth_(data, monthKey){
+  // Total Order must ALWAYS come from the explicit "Total Order" row
+  // in column A of the MOM Order sheet. Do not calculate it by summing
+  // department rows, because the card/trend must match the source sheet.
+  return Number(data.totalMap && data.totalMap[monthKey] || 0);
+}
+function orderCostMonthLabel_(data, monthKey){
+  const x=(data.months||[]).filter(function(m){return m.key===monthKey;})[0];
+  return x ? x.label : monthKey;
+}
+function getOrderCostReports(token,f){
+  require_(token,'orderCostView'); f=f||{};
+  const data=readMomOrder_(), months=(data.months||[]).slice().sort(function(a,b){return a.key.localeCompare(b.key);});
+  if(!months.length)return {rows:[],message:'No month/order data found in the MOM Order sheet.'};
+  let mk=normText_(f.month); if(!months.some(function(x){return x.key===mk;}))mk=months[months.length-1].key;
+  const idx=months.findIndex(function(x){return x.key===mk;});
+  function metricRow(m){
+    const rs=monthResourceSalaryStats_(m.key), orders=orderTotalForMonth_(data,m.key);
+    return {key:m.key,label:m.label,orderQty:orders,activeResources:rs.activeResources,deactiveResources:rs.deactiveResources,activePayroll:rs.activePayroll,deactivePayroll:rs.deactivePayroll,totalResources:rs.totalResources,totalPayroll:rs.totalPayroll,ppCost:orders?rs.activePayroll/orders:0,ppTotal:orders?rs.totalPayroll/orders:0};
+  }
+  if(String(f.type).toLowerCase()==='mom'){
+    const z={key:'',label:'—',orderQty:0,activeResources:0,deactiveResources:0,activePayroll:0,deactivePayroll:0,ppCost:0};
+    const prev=idx>0?metricRow(months[idx-1]):z,cur=metricRow(months[idx]);
+    const pct=function(a,b){return b?((a-b)/b*100).toFixed(2)+'%':'—';};
+    return {type:'mom',month:mk,rows:[
+      {metric:'Total Order',previousLabel:prev.label,selectedLabel:cur.label,previous:prev.orderQty,selected:cur.orderQty,changeText:pct(cur.orderQty,prev.orderQty)},
+      {metric:'Active Resources',previousLabel:prev.label,selectedLabel:cur.label,previous:prev.activeResources,selected:cur.activeResources,changeText:pct(cur.activeResources,prev.activeResources)},
+      {metric:'Deactive Resources',previousLabel:prev.label,selectedLabel:cur.label,previous:prev.deactiveResources,selected:cur.deactiveResources,changeText:pct(cur.deactiveResources,prev.deactiveResources)},
+      {metric:'Active Payroll',previousLabel:prev.label,selectedLabel:cur.label,previous:prev.activePayroll,selected:cur.activePayroll,changeText:pct(cur.activePayroll,prev.activePayroll)},
+      {metric:'Deactive Payroll',previousLabel:prev.label,selectedLabel:cur.label,previous:prev.deactivePayroll,selected:cur.deactivePayroll,changeText:pct(cur.deactivePayroll,prev.deactivePayroll)},
+      {metric:'P.P',previousLabel:prev.label,selectedLabel:cur.label,previous:prev.ppCost,selected:cur.ppCost,changeText:pct(cur.ppCost,prev.ppCost)}
+    ]};
+  }
+  // Cost Trend is always month-wise; no month selector/filter is applied here.
+  return {type:'trend',month:'',rows:months.map(metricRow)};
+}
+
+/* ================= FINAL DATA ERROR ANALYTICS ================= */
+function finalDataSheet_(){
+  const ss=main_();let sh=ss.getSheets().filter(function(s){return nameKey_(s.getName())===nameKey_(APP.FINAL_DATA_SHEET);})[0];
+  if(sh)return sh;
+  return ss.getSheets().filter(function(s){
+    if(s.getLastRow()<1||s.getLastColumn()<6)return false;
+    const h=s.getRange(1,1,1,Math.min(s.getLastColumn(),12)).getValues()[0].map(nameKey_);
+    return h.indexOf('consignment id')>-1&&h.some(function(x){return /^1st error$/.test(x);});
+  })[0]||null;
+}
+function getErrorAnalytics(token){
+  const a=require_(token);const sh=finalDataSheet_();
+  if(!sh||sh.getLastRow()<2)return {found:false,message:'Final Data sheet not found or has no records.',totals:{records:0,totalErrors:0,accuracy:100},breakdown:[],rows:[]};
+  const vals=sh.getDataRange().getDisplayValues(),head=vals[0].map(key_),col=function(n){return head.indexOf(key_(n));};
+  const c=[col('1st Error'),col('2nd Error'),col('3rd Error'),col('4th Error')],ci=col('Consignment ID');
+  if(c.every(function(x){return x<0;}))throw new Error('Error columns (1st Error – 4th Error) not found in the Final Data sheet.');
+  const data=vals.slice(1).filter(function(r){return r.some(function(v){return String(v||'').trim()!=='';});}),bd=[0,0,0,0],rows=[];
+  let total=0,bad=0;
+  data.forEach(function(r,i){const es=c.map(function(x){return x>=0?String(r[x]||'').trim():'';}),n=es.filter(Boolean).length;total+=n;if(n)bad++;es.forEach(function(v,j){if(v)bd[j]++;});rows.push({rowNumber:i+2,consignmentId:ci>=0?r[ci]:'',firstError:es[0],secondError:es[1],thirdError:es[2],fourthError:es[3],totalErrors:n});});
+  const accuracy=data.length?(data.length-bad)/data.length*100:100;log_(a.email,'ERROR_ANALYTICS_VIEW','');
+  return {found:true,records:data.length,totalErrorRows:bad,totals:{records:data.length,totalErrors:total,accuracy:accuracy},breakdown:bd.map(function(n,i){return {error:(i+1)+'th Error',count:n};}),rows:rows};
+}
+
+/* ================= CONFIG ================= */
+function getConfigData(token) { require_(token, 'configEdit'); return readConfigs_(); }
+function saveConfig(token, p) {
+  const a = require_(token, 'configEdit');
+  if (!p) throw new Error('Config data missing.');
+  if (!normText_(p.department) && !normText_(p.team)) throw new Error('Department or Team is required.');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sh = configSheet_(true);
+    const row = [normText_(p.department), normText_(p.team), normText_(p.office), normText_(p.zoneLead),
+      normText_(p.manager), normText_(p.process), toNum_(p.ptnRate), toNum_(p.bulkRate), pct_(p.bulkPct),
+      toNum_(p.shiftHours), toNum_(p.breakHours), toNum_(p.ectHours),
+      url_(p.link1), url_(p.link2), url_(p.link3), url_(p.link4)];
+    let target = Number(p.rowNumber || 0);
+    if (!(p.mode === 'update' && target >= 2)) target = Math.max(2, lastRowInCol_(sh, APP.CFG_COL) + 1);
+    sh.getRange(target, APP.CFG_COL, 1, APP.CFG_WIDTH).setValues([row]);
+    log_(a.email, 'CONFIG_UPDATE', JSON.stringify({ rowNumber:target, team:row[1], department:row[0] }));
+    return { success:true, rowNumber:target };
+  } finally { lock.releaseLock(); }
+}
+
+/* ================= LOGS ================= */
+function log_(email, action, details) {
+  try {
+    const sh = audit_().getSheetByName(APP.LOG_SHEET);
+    if (sh) sh.appendRow([new Date(), normEmail_(email), action || '', String(details || ''), 'Web App']);
+  } catch (e) { console.error('Logging failed: ' + e.message); }
+}
+function getAppLogs(token, limit) {
+  require_(token, 'configEdit');
+  const sh = audit_().getSheetByName(APP.LOG_SHEET);
+  if (!sh || sh.getLastRow() < 2) return [];
+  const max = Math.min(Number(limit || 500), 2000), last = sh.getLastRow(), start = Math.max(2, last - max + 1);
+  return sh.getRange(start, 1, last - start + 1, 5).getValues().map(function(r){
+    return { timestamp:dt_(r[0]), email:String(r[1]||''), action:String(r[2]||''), details:String(r[3]||''), source:String(r[4]||'') };
+  }).reverse();
+}
+
+/* ================= ATTENDANCE (live sync from Attendance spreadsheet) ================= */
+const MON3_ = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+function pad2_(n) { return (n < 10 ? '0' : '') + n; }
+// Payroll cycle: 21st -> next month 20th. Tab "Oct 26" = 21 Sep 2026 .. 20 Oct 2026
+function cycleKey_(d) {
+  let y = d.getFullYear(), m = d.getMonth();
+  if (d.getDate() >= 21) { m++; if (m > 11) { m = 0; y++; } }
+  return y + '-' + pad2_(m + 1);
+}
+function attTabs_() {
+  if (_mem.attTabs) return _mem.attTabs;
+  let ss;
+  try { ss = SpreadsheetApp.openById(APP.ATT_ID); }
+  catch (e) { throw new Error('The Attendance spreadsheet could not be opened. Please verify that the script account has access.\n' + e.message); }
+  _mem.attTabs = ss.getSheets().map(function(s) {
+    const m = /^([A-Za-z]{3})[A-Za-z]*[\s'-]*(\d{2,4})\s*\(\s*(operator|management)\s*\)/i.exec(s.getName().trim());
+    if (!m) return null;
+    const mon = MON3_.indexOf(m[1].toLowerCase());
+    if (mon < 0) return null;
+    let yr = Number(m[2]); if (yr < 100) yr += 2000;
+    return { sheet:s, name:s.getName(), month:mon, year:yr, key:yr + '-' + pad2_(mon + 1),
+      group:m[3].charAt(0).toUpperCase() + m[3].slice(1).toLowerCase() };
+  }).filter(Boolean);
+  return _mem.attTabs;
+}
+function classify_(raw) {
+  const c = String(raw || '').trim().toLowerCase();
+  if (!c) return '';
+  if (/^(p|present)\b/.test(c) || /^\d/.test(c)) return 'P';
+  if (/^(a|absent)\b/.test(c)) return 'A';
+  if (/^(l|leave|cl|sl|al|el|ml|lwp)\b/.test(c)) return 'L';
+  if (/^(off|o|wo|w|weekend|weekly off)\b/.test(c)) return 'OFF';
+  if (/^(ph|h|holiday|public)/.test(c)) return 'H';
+  return 'X';
+}
+function sumKey_(h) {
+  h = String(h).replace(/\s+/g, ' ').trim().toLowerCase();
+  const map = { 'present':'present', 'absent':'absent', 'leave':'leave', 'off day':'offDay', 'holiday':'holiday', 'ot':'ot',
+    'late':'late', 'early':'early', 'night shift':'nightShift', 'l/e time':'leTime', 'cut days':'cutDays', 'off day duty':'offDayDuty', 'total':'total' };
+  if (map[h]) return map[h];
+  if (/pub.*holiday/.test(h)) return 'publicHoliday';
+  if (/remark/.test(h)) return 'remarks';
+  return '';
+}
+function parseAtt_(tab) {
+  const v = tab.sheet.getDataRange().getDisplayValues();
+  let hr = -1;
+  for (let i = 0; i < Math.min(v.length, 15); i++) {
+    if (key_(v[i][0]) === 'id' && v[i].some(function(c){ return /^name$/i.test(String(c).trim()); })) { hr = i; break; }
+  }
+  if (hr < 0) throw new Error('Attendance header row (ID, Name, ...) not found: ' + tab.name);
+  const head = v[hr].map(function(x){ return String(x).replace(/\s+/g, ' ').trim(); });
+  const col = function(re){ for (let i = 0; i < head.length; i++) if (re.test(head[i])) return i; return -1; };
+  const c = { id:Math.max(0, col(/^id$/i)), name:col(/^name$/i), des:col(/^designation$/i), dept:col(/^department$/i),
+    doj:col(/^doj$/i), res:col(/^resignation/i), wk:col(/^week/i) };
+  const dates = [], dre = /^(\d{1,2})[-\/ ]*([A-Za-z]{3})/;
+  let j = c.wk >= 0 ? c.wk + 1 : 0;
+  for (; j < head.length; j++) {
+    const m = dre.exec(head[j]);
+    if (!m) { if (dates.length) break; continue; }
+    const mon = MON3_.indexOf(m[2].toLowerCase());
+    if (mon < 0) { if (dates.length) break; continue; }
+    const yr = mon === tab.month ? tab.year : (mon > tab.month ? tab.year - 1 : tab.year);
+    const dt = new Date(yr, mon, Number(m[1]));
+    dates.push({ col:j, iso:iso_(dt), label:Number(m[1]) + ' ' + MONTHS_[mon].slice(0, 3), dow:dt.getDay() });
+  }
+  const sumCols = [];
+  for (let k = j; k < head.length; k++) { const key = sumKey_(head[k]); if (key) sumCols.push({ col:k, key:key }); }
+  const get = function(row, i){ return i >= 0 ? String(row[i] || '').trim() : ''; };
+  const rows = [];
+  for (let r = hr + 1; r < v.length; r++) {
+    const row = v[r], id = get(row, c.id), name = get(row, c.name);
+    if (!id && !name) continue;
+    const codes = dates.map(function(d){ return String(row[d.col] || '').trim(); });
+    const classes = codes.map(classify_);
+    const counts = { P:0, A:0, L:0, OFF:0, H:0 };
+    classes.forEach(function(x){ if (counts[x] !== undefined) counts[x]++; });
+    const summary = {};
+    sumCols.forEach(function(s){
+      const raw = String(row[s.col] || '').trim();
+      summary[s.key] = (s.key === 'remarks' || s.key === 'leTime') ? raw : (raw === '' ? null : toNum_(raw));
+    });
+    rows.push({ id:id, name:name, designation:get(row, c.des), department:get(row, c.dept), doj:get(row, c.doj),
+      resign:get(row, c.res), weekend:get(row, c.wk), codes:codes, classes:classes, counts:counts, summary:summary });
+  }
+  return { tab:tab.name, key:tab.key, group:tab.group,
+    dates:dates.map(function(d){ return { iso:d.iso, label:d.label, dow:d.dow }; }), rows:rows };
+}
+function readAtt_(key, group) {
+  const mk = 'att|' + key + '|' + group;
+  if (_mem[mk] !== undefined) return _mem[mk];
+  const tab = attTabs_().filter(function(t){ return t.key === key && t.group === group; })[0];
+  return (_mem[mk] = tab ? parseAtt_(tab) : null);
+}
+function getAttendanceMonths(token) {
+  require_(token);
+  const map = {};
+  attTabs_().forEach(function(t){
+    const x = map[t.key] || (map[t.key] = { key:t.key, year:t.year, month:t.month, groups:[] });
+    x.groups.push(t.group);
+  });
+  const cur = cycleKey_(new Date());
+  return Object.keys(map).sort().reverse().map(function(k){
+    const x = map[k], s = new Date(x.year, x.month - 1, 21), e = new Date(x.year, x.month, 20);
+    return { key:k, label:MONTHS_[x.month] + ' ' + x.year, groups:x.groups, current:k === cur,
+      range:Utilities.formatDate(s, tz_(), 'dd MMM') + ' – ' + Utilities.formatDate(e, tz_(), 'dd MMM yyyy') };
+  });
+}
+function getEmployeeAttendance(token, employeeId, monthKey) {
+  require_(token);
+  const key = monthKey || cycleKey_(new Date()), id = key_(employeeId), groups = ['Operator', 'Management'];
+  for (let i = 0; i < groups.length; i++) {
+    const t = readAtt_(key, groups[i]);
+    if (!t) continue;
+    const r = t.rows.filter(function(x){ return key_(x.id) === id; })[0];
+    if (r) return { found:true, key:key, group:groups[i], tab:t.tab, dates:t.dates, codes:r.codes, classes:r.classes,
+      counts:r.counts, summary:r.summary };
+  }
+  return { found:false, key:key, message:'No attendance found for Employee ID ' + employeeId + ' in this cycle (' + key + ').' };
+}
+function weekendParts_(v) {
+  const s = key_(v);
+  if (!s) return [];
+  const names = {sunday:0,monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6,
+    sun:0,mon:1,tue:2,tues:2,wed:3,weds:3,thu:4,thur:4,thurs:4,fri:5,sat:6};
+  const out = [];
+  s.replace(/[&,/|+]+/g,' ').replace(/\s*-\s*/g,' ').split(/\s+/).forEach(function(x){
+    if (names[x] !== undefined && out.indexOf(names[x]) < 0) out.push(names[x]);
+    else if (/^[0-6]$/.test(x)) { const n=Number(x); if(out.indexOf(n)<0)out.push(n); }
+  });
+  return out;
+}
+function isWeekend_(weekend, dow) { return weekendParts_(weekend).indexOf(Number(dow)) > -1; }
+function attendanceRowCounts_(r,t) {
+  const out = {present:0,absent:0,leave:0,offDay:0,weekend:0,holiday:0,late:0,ot:0,early:0,nightShift:0,cutDays:0};
+  const s=r.summary||{};
+  out.late=Number(s.late)||0; out.ot=Number(s.ot)||0; out.early=Number(s.early)||0;
+  out.nightShift=Number(s.nightShift)||0; out.cutDays=Number(s.cutDays)||0;
+
+  for(let i=0;i<t.dates.length;i++){
+    const raw=String(r.codes[i]||'').trim().toLowerCase();
+    const cl=String(r.classes[i]||'').toUpperCase();
+    const wk=isWeekend_(r.weekend,t.dates[i].dow);
+    const code = cl || (raw ? classify_(raw) : '');
+
+    // Priority: actual attendance status first. A/L/H on a weekend must NOT
+    // become Day Off. Weekend Worked means the employee actually worked (P).
+    if(code==='P'){
+      out.present++;
+      if(wk) out.weekend++;
+      continue;
+    }
+    if(code==='A'){ out.absent++; continue; }
+    if(code==='L'){ out.leave++; continue; }
+    if(code==='H'){ out.holiday++; continue; }
+
+    // OFF / blank roster day on the employee's Weekend/Week = Day Off.
+    if(code==='OFF' || wk){ out.offDay++; continue; }
+  }
+
+  // Keep sheet summary for Present/Absent/Leave/Holiday only when available.
+  // Day Off and Weekend Worked remain calculated from daily roster/code data.
+  if(s.present!=null) out.present=Number(s.present)||out.present;
+  if(s.absent!=null) out.absent=Number(s.absent)||out.absent;
+  if(s.leave!=null) out.leave=Number(s.leave)||out.leave;
+  if(s.holiday!=null || s.publicHoliday!=null) out.holiday=(Number(s.holiday)||0)+(Number(s.publicHoliday)||0);
+  return out;
+}
+
+function getAttendanceWeekendOptions(token, monthKey, group) {
+  require_(token);
+  const key=monthKey||cycleKey_(new Date()), groups=group&&group!=='All'?[group]:['Operator','Management'], set={};
+  groups.forEach(function(g){ const t=readAtt_(key,g); if(!t)return; t.rows.forEach(function(r){ if(r.weekend) set[normText_(r.weekend)]=1; }); });
+  return Object.keys(set).sort();
+}
+function getAttendanceReport(token, f) {
+  require_(token);
+  f = f || {};
+  const key = f.key || cycleKey_(new Date()), group = f.group || 'All';
+  const groups = group === 'All' ? ['Operator', 'Management'] : [group];
+  const empMap = {}; readEmployees_().forEach(function(e){ empMap[key_(e.employeeId)] = e; });
+  const q = key_(f.search), want = key_(f.department), wantWeekend=key_(f.weekend);
+  const rows = [], missing = [];
+  groups.forEach(function(g) {
+    const t = readAtt_(key, g);
+    if (!t) { missing.push(g); return; }
+    t.rows.forEach(function(r) {
+      const e = empMap[key_(r.id)], dept = (e ? e.department : r.department) || 'Unassigned';
+      if (want && want !== 'all' && key_(dept) !== want) return;
+      if (wantWeekend && wantWeekend !== 'all' && key_(r.weekend) !== wantWeekend) return;
+      if (q && [r.id, r.name, dept, r.weekend].join(' ').toLowerCase().indexOf(q) < 0) return;
+      const z=attendanceRowCounts_(r,t);
+      rows.push({ id:r.id, name:r.name, designation:r.designation, department:dept, group:g, weekend:r.weekend,
+        present:z.present, absent:z.absent, leave:z.leave, offDay:z.offDay, weekendDays:z.weekend, holiday:z.holiday,
+        ot:z.ot, late:z.late, early:z.early, nightShift:z.nightShift, cutDays:z.cutDays,
+        total:r.summary.total == null ? '' : r.summary.total });
+    });
+  });
+  const add = function(x, r){ ['present','absent','leave','offDay','weekendDays','late','ot'].forEach(function(k){ x[k] += Number(r[k]) || 0; }); };
+  const mk = function(n){ return { department:n, headcount:0, present:0, absent:0, leave:0, offDay:0, weekendDays:0, late:0, ot:0, absentPct:0 }; };
+  const totals = mk('All'), depts = {};
+  rows.forEach(function(r){ totals.headcount++; add(totals, r); const d = depts[r.department] || (depts[r.department] = mk(r.department)); d.headcount++; add(d, r); });
+  const pct = function(x){ const b=x.present+x.absent+x.leave; x.absentPct=b?x.absent/b*100:0; };
+  pct(totals);
+  Object.keys(depts).forEach(function(k){pct(depts[k]);});
+  const parts = key.split('-'), yr = Number(parts[0]), mo = Number(parts[1]);
+  return { key:key, label:MONTHS_[mo - 1] + ' ' + yr, missing:missing, totals:totals, rows:rows,
+    departments:Object.keys(depts).sort().map(function(k){ return depts[k]; }) };
+}
+// Today's off-day + leave count for a set of employee IDs (used by Forecast)
+function attDayOff_(ids) {
+  try {
+    const today = new Date(), iso = iso_(today), key = cycleKey_(today);
+    let off = 0, found = false;
+    ['Operator', 'Management'].forEach(function(g) {
+      const t = readAtt_(key, g);
+      if (!t) return;
+      let idx = -1;
+      t.dates.forEach(function(d, i){ if (d.iso === iso) idx = i; });
+      if (idx < 0) return;
+      found = true;
+      t.rows.forEach(function(r){ if (ids[key_(r.id)]) { const z=attendanceRowCounts_(r,t); if(z.offDay>0 || r.classes[idx] === 'L') off++; } });
+    });
+    return found ? off : null;
+  } catch (e) { return null; }
+}
+
+/* ================= SALARY TAB ================= */
+function readSalaryMap_() {
+  if (_mem.salMap) return _mem.salMap;
+  const map = {};
+  try {
+    const sh = audit_().getSheetByName(APP.SALARY_TAB);
+    if (sh && sh.getLastRow() > 1) {
+      sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues().forEach(function(r, i){
+        const id = key_(r[0]);
+        if (id) map[id] = { salary:toNum_(r[2]), row:i + 2 };
+      });
+    }
+  } catch (e) { console.error('Salary tab read failed: ' + e.message); }
+  return (_mem.salMap = map);
+}
+// RUN ONCE from the editor BEFORE deleting column I of the Data sheet.
+function migrateSalaryFromData() {
+  const sh = dataSheet_(), last = sh.getLastRow();
+  const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  let sc = -1;
+  head.forEach(function(h, i){ if (sc < 0 && /^salary$/i.test(String(h).trim())) sc = i + 1; });
+  if (sc < 0) throw new Error('Salary column not found in the Data sheet (already deleted?).');
+  const ids = sh.getRange(2, DC.EMP_ID, last - 1, 1).getValues(), names = sh.getRange(2, DC.EMP_NAME, last - 1, 1).getValues();
+  const sal = sh.getRange(2, sc, last - 1, 1).getValues();
+  const tab = auditSheet_(APP.SALARY_TAB, SAL_HEADERS), have = readSalaryMap_(), add = [], seen = {};
+  ids.forEach(function(r, i) {
+    const id = normText_(r[0]), k = key_(id);
+    if (!id || have[k] || seen[k]) return;
+    seen[k] = 1;
+    add.push([id, normText_(names[i][0]), toNum_(sal[i][0]), new Date(), 'Migration']);
+  });
+  if (add.length) tab.getRange(tab.getLastRow() + 1, 1, add.length, 5).setValues(add);
+  const res = { added:add.length, alreadyThere:ids.length - add.length, salaryColumn:sc };
+  Logger.log(JSON.stringify(res));
+  return res;
+}
+
+/* ================= SALARY HISTORY AS SOURCE ================= */
+// Reads the 'Salary History' sheet (LOG spreadsheet). Backend-e manually row dile-o salary update hobe.
+// Required columns: B=Employee ID, E=New Salary, F=Effective Date.  (D=Old Salary optional)
+function readSalaryHistoryMap_() {
+  if (_mem.salHist) return _mem.salHist;
+  const map = {};
+  try {
+    const sh = audit_().getSheetByName(APP.SALARY_SHEET);
+    if (sh && sh.getLastRow() > 1) {
+      sh.getRange(2, 1, sh.getLastRow() - 1, 8).getValues().forEach(function(r, i) {
+        const id = key_(r[1]), sal = toNum_(r[4]);
+        if (!id || !(sal > 0)) return;
+        const eff = toDate_(r[5]) || toDate_(r[0]);
+        if (!eff) return;
+        (map[id] = map[id] || []).push({ eff:eff, sal:sal, old:toNum_(r[3]), ts:toDate_(r[0]), seq:i });
+      });
+      Object.keys(map).forEach(function(k){
+        map[k].sort(function(x, y){ return (x.eff - y.eff) || ((x.ts ? x.ts.getTime() : 0) - (y.ts ? y.ts.getTime() : 0)) || (x.seq - y.seq); });
+      });
+    }
+  } catch (e) { console.error('Salary history read failed: ' + e.message); }
+  return (_mem.salHist = map);
+}
+function salaryAsOf_(hist, date, fallback) {
+  let cur = null;
+  hist.forEach(function(h){ if (h.eff <= date) cur = h; });
+  if (cur) return cur.sal;
+  return hist.length && hist[0] && hist[0].old > 0 ? hist[0].old : fallback;   // before the first recorded change
+}
+
+/* ================= UTILS ================= */
+function normText_(v) { return v === null || v === undefined ? '' : String(v).trim(); }
+function normEmail_(v) { return normText_(v).toLowerCase(); }
+function key_(v) { return normText_(v).toLowerCase().replace(/\s+/g, ' '); }
+function toBool_(v) { return v === true || v === 1 || ['true','yes','y','1','active','enabled'].indexOf(key_(v)) > -1; }
+function toNum_(v) {
+  if (v === null || v === undefined || v === '') return 0;
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  const n = Number(String(v).replace(/,/g, '').replace(/[^\d.-]/g, ''));
+  return isFinite(n) ? n : 0;
+}
+function pct_(v) {
+  if (v === null || v === undefined || v === '') return 0;
+  const n = typeof v === 'number' ? v : Number(String(v).replace('%', '').trim());
+  if (!isFinite(n)) return 0;
+  return n > 1 ? n / 100 : n;
+}
+function url_(v) { const s = normText_(v); return /^https?:\/\/.+/i.test(s) ? s : ''; }
+function toDate_(v) {
+  if (!v) return null;
+  const d = Object.prototype.toString.call(v) === '[object Date]' ? new Date(v) : new Date(v);
+  return isNaN(d.getTime()) ? null : d;
+}
+function plain_(v) { return Object.prototype.toString.call(v) === '[object Date]' ? iso_(v) : (v === null || v === undefined ? '' : v); }
+function tz_() { return Session.getScriptTimeZone() || 'Asia/Dhaka'; }
+function iso_(d) { return d ? Utilities.formatDate(d, tz_(), 'yyyy-MM-dd') : ''; }
+function dt_(d) { return d && d.getTime ? Utilities.formatDate(d, tz_(), 'yyyy-MM-dd HH:mm:ss') : String(d || ''); }
+function isActive_(e) { return key_(e.status) === 'active'; }
+function isOperator_(e) { const d = key_(e.designation); return d.indexOf('operator') > -1 || d.indexOf('sorter') > -1; }
+function sameMonth_(a, b) { return !!a && !!b && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth(); }
+function monthDiff_(s, e) { return (e.getFullYear() - s.getFullYear()) * 12 + e.getMonth() - s.getMonth(); }
+function average_(arr) { return arr && arr.length ? arr.reduce(function(x, y){ return x + y; }, 0) / arr.length : 0; }
+function uniq_(arr) { return Array.from(new Set(arr.filter(Boolean))).sort(); }
+function yearList_(emps) {
+  const y = {};
+  emps.forEach(function(e){ if (e.doj) y[e.doj.getFullYear()] = 1; if (e.deactiveDate) y[e.deactiveDate.getFullYear()] = 1; });
+  y[new Date().getFullYear()] = 1;
+  return Object.keys(y).map(Number).sort(function(a, b){ return b - a; });
+}
+function lastRowInCol_(sh, col) {
+  const v = sh.getRange(1, col, sh.getMaxRows(), 1).getValues();
+  for (let i = v.length - 1; i >= 0; i--) if (String(v[i][0]).trim() !== '') return i + 1;
+  return 0;
+}
