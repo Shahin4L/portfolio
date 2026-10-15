@@ -477,7 +477,8 @@
     .stat-card{border-top:3px solid var(--teal)}
     .res-wrap{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;position:relative}
     .res-card{padding:26px 22px;border-radius:20px;background:linear-gradient(160deg,#ffffff14,#ffffff06);border:1px solid #ffffff22}
-    .res-num{font-size:clamp(2.4rem,4.4vw,3.6rem);font-weight:800;letter-spacing:-.05em;line-height:1;color:#fff}
+    ..res-num{display:flex;align-items:baseline;gap:3px;font-size:clamp(3rem,5.4vw,4.4rem)}
+    .res-num .unit{font-size:.42em;font-weight:700;color:#8fd3cf;letter-spacing:0}
     .res-card b{display:block;margin:10px 0 6px;color:#8fd3cf}.res-card span{color:#bdc9dd;font-size:.85rem}
     @media(max-width:900px){.res-wrap{grid-template-columns:1fr 1fr}}
     @media(max-width:520px){.res-wrap{grid-template-columns:1fr}}
@@ -536,9 +537,9 @@
 </div>
 </section>
 <section class="section-dark" id="results"><div class="container"><div class="section-head"><div class="section-kicker" style="color:#8fd3cf">Results at Carrybee Express</div><h2>Faster, more accurate, cheaper to run.</h2><p class="section-intro">Process redesign, semi-automation and tighter item control across 11 operational functions and 190+ staff.</p></div>
-<div class="res-wrap"><div class="res-card"><div class="res-num"><span class="cnt" data-to="30">30</span>%</div><b>Lower turnaround time</b><span>PTN process, 2-click gate pass, auto-assigned return validation</span></div>
-<div class="res-card"><div class="res-num"><span class="cnt" data-to="40">40</span>%</div><b>Fewer errors</b><span>CCTV-verified baskets, floor taping, name plates, handling guidelines</span></div>
-<div class="res-card"><div class="res-num"><span class="cnt" data-to="15">15</span>%</div><b>Lower operating cost</b><span>Manpower optimisation and an Order Management System app</span></div>
+<div class="res-wrap"><div class="res-card"><div class="res-num"><span class="cnt" data-to="30">30</span><span class="unit">%</span></div><b>Lower turnaround time</b><span>PTN process, 2-click gate pass, auto-assigned return validation</span></div>
+<div class="res-card"><div class="res-num"><span class="cnt" data-to="40">40</span><span class="unit">%</span></div><b>Fewer errors</b><span>CCTV-verified baskets, floor taping, name plates, handling guidelines</span></div>
+<div class="res-card"><div class="res-num"><span class="cnt" data-to="15">15</span><span class="unit">%</span></div><b>Lower operating cost</b><span>Manpower optimisation and an Order Management System app</span></div>
 <div class="res-card"><div class="res-num"><span class="cnt" data-to="7">7</span></div><b>Leaders trained</b><span>Executives and senior associates</span></div></div></div></section>
 <script>(function(){var e=document.querySelectorAll('.cnt');if(!('IntersectionObserver'in window)||matchMedia('(prefers-reduced-motion:reduce)').matches)return;var o=new IntersectionObserver(function(l){l.forEach(function(x){if(!x.isIntersecting)return;var n=x.target,t=+n.dataset.to,i=0;o.unobserve(n);var h=setInterval(function(){i+=Math.max(1,Math.ceil(t/24));if(i>=t){i=t;clearInterval(h)}n.textContent=i},35)})},{threshold:.5});e.forEach(function(n){o.observe(n)})})();</script>
 <section id="about">
