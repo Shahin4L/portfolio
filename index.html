@@ -477,9 +477,10 @@
     .stat-card{border-top:3px solid var(--teal)}
     .res-wrap{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;position:relative}
     .res-card{padding:26px 22px;border-radius:20px;background:linear-gradient(160deg,#ffffff14,#ffffff06);border:1px solid #ffffff22}
-    ..res-num{display:flex;align-items:baseline;gap:3px;font-size:clamp(3rem,5.4vw,4.4rem)}
-    .res-num .unit{font-size:.42em;font-weight:700;color:#8fd3cf;letter-spacing:0}
-    .res-card b{display:block;margin:10px 0 6px;color:#8fd3cf}.res-card span{color:#bdc9dd;font-size:.85rem}
+    .res-num{display:flex;align-items:baseline;gap:4px;font-size:clamp(3rem,5.4vw,4.4rem);font-weight:800;letter-spacing:-.05em;line-height:1;color:#fff}
+    .res-num .cnt{font-size:inherit;color:inherit}
+    .res-num .unit{font-size:.4em;font-weight:700;color:#8fd3cf;letter-spacing:0}
+    .res-card b{display:block;margin:10px 0 6px;color:#8fd3cf}.res-card>span{color:#bdc9dd;font-size:.85rem}
     @media(max-width:900px){.res-wrap{grid-template-columns:1fr 1fr}}
     @media(max-width:520px){.res-wrap{grid-template-columns:1fr}}
   </style>
