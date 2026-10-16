@@ -483,6 +483,13 @@
     .res-card b{display:block;margin:10px 0 6px;color:#8fd3cf}.res-card>span{color:#bdc9dd;font-size:.85rem}
     @media(max-width:900px){.res-wrap{grid-template-columns:1fr 1fr}}
     @media(max-width:520px){.res-wrap{grid-template-columns:1fr}}
+    
+    /* Hero buttons: 3ta pasapasi */
+    .hero-grid{grid-template-columns:minmax(0,1.3fr) minmax(300px,.7fr)}
+    .hero-actions{display:flex;flex-wrap:wrap;gap:10px}
+    .hero-actions .btn{flex:0 0 auto;padding:11px 15px;font-size:.86rem;white-space:nowrap}
+    @media(max-width:760px){.hero-grid{grid-template-columns:1fr}}
+    @media(max-width:430px){.hero-actions .btn{width:100%}}
   </style>
 </head>
 <body class="no-js">
@@ -1323,7 +1330,7 @@
 (function () {
   var BN = {
     n_about:"পরিচিতি", n_teams:"১১টি টিম", n_metrics:"মেট্রিক্স", n_projects:"প্রজেক্ট", n_exp:"অভিজ্ঞতা", n_skills:"দক্ষতা", n_services:"সেবা",
-    cta1:"১১টি কোর টিম দেখুন", cta2:"আমার অভিজ্ঞতা দেখুন",
+    cta1:"১১টি কোর টিম দেখুন", cta2:"আমার অভিজ্ঞতা দেখুন", cta3:"রিজিউম ডাউনলোড করুন",
     s1:"বছরের পেশাগত অভিজ্ঞতা", s2:"নেতৃত্বের আওতায় টিম সদস্য", s3:"দৈনিক পার্সেল হ্যান্ডলিং", s4:"দৈনিক পার্সেল প্রসেসিং",
     h_about:"ইঞ্জিনিয়ারিং ভাবনা, অপারেশন নেতৃত্ব ও ধারাবাহিক উন্নয়ন।",
     h_teams:"১১টি কোর টিম, একটি অভিন্ন অপারেশনাল লক্ষ্য।",
